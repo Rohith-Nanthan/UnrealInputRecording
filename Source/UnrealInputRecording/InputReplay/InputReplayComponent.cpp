@@ -50,6 +50,10 @@ void UInputReplayComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		StopRecording();
 	}
+	else if (Mode == EInputReplayMode::MatchInput)
+	{
+		StopMatchInput();
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -719,6 +723,23 @@ void UInputReplayComponent::TickPostInput(float DeltaSeconds, bool bGamePaused)
 	{
 		ValidateSyncPoint(CurrentFrameIndex);
 	}
+	else if (Mode == EInputReplayMode::MatchInput)
+	{
+		// Same reasoning as recording: we compare the player's input *after* the stack has run, so
+		// what we test against the cue is the same post-modifier value the recording stored.
+		TickMatchInput(DeltaSeconds);
+	}
+}
+
+void UInputReplayComponent::SetRecording(const FInputRecording& InRecording)
+{
+	if (Mode != EInputReplayMode::Idle)
+	{
+		UE_LOG(LogInputReplay, Warning, TEXT("SetRecording ignored: component is busy."));
+		return;
+	}
+
+	Recording = InRecording;
 }
 
 void UInputReplayComponent::AdvanceStateTo(int32 TargetFrame, int32 StepsConsumed)
@@ -937,4 +958,429 @@ void UInputReplayComponent::EndFixedTimeStepOverride()
 	FApp::SetUseFixedTimeStep(bSavedUseFixedTimeStep);
 	FApp::SetFixedDeltaTime(SavedFixedDeltaTime);
 	bPushedFixedTimeStep = false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// MatchInput - interactive playback
+// ---------------------------------------------------------------------------------------------
+//
+// How this differs from StartPlayback():
+//
+//   Playback  : the recording drives the pawn. Input is injected, the player's mapping contexts are
+//               removed so they cannot fight the ghost, and the logical clock never stops.
+//   MatchInput: the *player* drives the pawn. Nothing is injected, nothing is suppressed, and the
+//               logical clock stops dead at every cue until the player reproduces it.
+//
+// Deliberately NOT implemented via UWorld pause: while the world is paused, Enhanced Input only
+// evaluates actions flagged bTriggerWhenPaused, so almost every action would read as zero and no
+// input could ever be matched. "Pausing" here means freezing MatchClockSeconds, which is the only
+// thing that actually needs to stop.
+
+bool UInputReplayComponent::StartMatchInput()
+{
+	if (Mode != EInputReplayMode::Idle)
+	{
+		UE_LOG(LogInputMatch, Warning, TEXT("StartMatchInput ignored: component is busy (mode=%d)."), static_cast<int32>(Mode));
+		return false;
+	}
+
+	if (!Recording.IsValidRecording())
+	{
+		UE_LOG(LogInputMatch, Error, TEXT("StartMatchInput: no recording loaded. Call LoadRecordingFromFile first."));
+		return false;
+	}
+
+	// MatchInput compares against the recording's own action registry, so resolve it exactly as
+	// playback would - cue ActionIndex values are indices into it.
+	FString Error;
+	if (!ResolveActionRegistry(Error))
+	{
+		UE_LOG(LogInputMatch, Error, TEXT("StartMatchInput: %s"), *Error);
+		return false;
+	}
+
+	BuildMatchInputCues();
+	if (MatchCues.Num() == 0)
+	{
+		UE_LOG(LogInputMatch, Error,
+			TEXT("StartMatchInput: '%s' contains no discrete presses above the %.2f threshold. ")
+			TEXT("A recording of nothing but mouse look or stick drift has nothing to match - lower ")
+			TEXT("MatchCueOptions.PressThreshold or record some button presses."),
+			*Recording.Header.DisplayName, MatchCueOptions.PressThreshold);
+		return false;
+	}
+
+	BuildMatchListenList();
+	if (MatchListenStates.Num() == 0)
+	{
+		UE_LOG(LogInputMatch, Error, TEXT("StartMatchInput: no live actions to listen to."));
+		return false;
+	}
+
+	ResetMatchInputProgress();
+
+	// Note what we are NOT doing: no ApplyLiveInputSuppression, no BeginFixedTimeStepOverride, no
+	// RNG reseed. The player has to keep their mappings, and the wall clock has to stay the wall
+	// clock, or the cue intervals would not mean anything.
+	Mode = EInputReplayMode::MatchInput;
+	OnMatchInputStarted.Broadcast();
+
+	UE_LOG(LogInputMatch, Log,
+		TEXT("MatchInput started on '%s': %d cue(s) over %.2fs, listening to %d action(s)."),
+		*Recording.Header.DisplayName, MatchCues.Num(), Recording.GetDurationSeconds(), MatchListenStates.Num());
+
+	return true;
+}
+
+void UInputReplayComponent::StopMatchInput()
+{
+	FinishMatchInput(/*bCompletedAllCues=*/false);
+}
+
+void UInputReplayComponent::FinishMatchInput(bool bCompletedAllCues)
+{
+	if (Mode != EInputReplayMode::MatchInput)
+	{
+		return;
+	}
+
+	Mode = EInputReplayMode::Idle;
+	bMatchAwaitingInput = false;
+	bMatchEdgesPrimed = false;
+	MatchOnsetIndices.Reset();
+
+	OnMatchInputFinished.Broadcast(bCompletedAllCues);
+
+	UE_LOG(LogInputMatch, Log, TEXT("MatchInput %s after %d/%d cue(s)."),
+		bCompletedAllCues ? TEXT("completed") : TEXT("stopped"), MatchCueCursor, MatchCues.Num());
+}
+
+void UInputReplayComponent::BuildMatchInputCues()
+{
+	UInputMatchLibrary::BuildMatchInputCues(Recording, MatchCueOptions, MatchCues);
+
+	if (bVerboseMatchLogging)
+	{
+		for (int32 Index = 0; Index < MatchCues.Num(); ++Index)
+		{
+			const FMatchInputCue& Cue = MatchCues[Index];
+			UE_LOG(LogInputMatch, Verbose, TEXT("  Cue %2d: t=%6.2fs (+%.2fs)  %s"),
+				Index + 1, Cue.TimeSeconds, Cue.IntervalFromPreviousSeconds, *Cue.Description);
+		}
+	}
+}
+
+void UInputReplayComponent::BuildMatchListenList()
+{
+	MatchListenStates.Reset();
+
+	// Registry lookup by pointer. TrackedActions is short (a handful of actions), so a linear scan
+	// is cheaper than building a map, and this only runs once per session.
+	auto FindRegistryIndex = [this](const UInputAction* Action) -> int32
+	{
+		for (int32 Index = 0; Index < TrackedActions.Num(); ++Index)
+		{
+			if (TrackedActions[Index].Get() == Action)
+			{
+				return Index;
+			}
+		}
+		return INDEX_NONE;
+	};
+
+	auto ShouldIgnore = [this](const UInputAction* Action) -> bool
+	{
+		if (!Action)
+		{
+			return true;
+		}
+
+		// A per-frame delta action (mouse XY) is never a cue, and listening to it would fire a
+		// mismatch on every mouse twitch.
+		if (MatchCueOptions.bIgnoreFrameDeltaActions && FrameDeltaActions.Contains(const_cast<UInputAction*>(Action)))
+		{
+			return true;
+		}
+
+		const FString Path = Action->GetPathName();
+		const FString Name = Action->GetName();
+		for (const FString& Entry : MatchCueOptions.IgnoredActions)
+		{
+			if (!Entry.IsEmpty() && (Entry == Path || Entry == Name))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	auto AddListen = [this](const UInputAction* Action, int32 RegistryIndex)
+	{
+		for (const FMatchListenState& Existing : MatchListenStates)
+		{
+			if (Existing.Action.Get() == Action)
+			{
+				return;
+			}
+		}
+
+		FMatchListenState& State = MatchListenStates.AddDefaulted_GetRef();
+		State.Action        = Action;
+		State.RegistryIndex = RegistryIndex;
+		State.ActionName    = Action->GetName();
+		State.ValueType     = static_cast<uint8>(Action->ValueType);
+	};
+
+	// ---- 1. Everything the recording itself references ---------------------------------------
+	for (int32 Index = 0; Index < TrackedActions.Num(); ++Index)
+	{
+		const UInputAction* Action = TrackedActions[Index];
+		if (!Action)
+		{
+			continue;   // unresolvable path; ResolveActionRegistry already warned
+		}
+		if (MatchCueOptions.bIgnoreFrameDeltaActions && TrackedActionIsDelta.IsValidIndex(Index) && TrackedActionIsDelta[Index])
+		{
+			continue;
+		}
+		if (ShouldIgnore(Action))
+		{
+			continue;
+		}
+		AddListen(Action, Index);
+	}
+
+	// ---- 2. Actions the recording never contained --------------------------------------------
+	// These can never satisfy a cue (RegistryIndex stays INDEX_NONE), but watching them is what
+	// lets the mismatch log say "the player pressed IA_Crouch" instead of staying silent.
+	if (bMatchListenToUnrecordedActions)
+	{
+		auto ConsiderExtra = [&](const UInputAction* Action)
+		{
+			if (!Action || ShouldIgnore(Action))
+			{
+				return;
+			}
+			if (FindRegistryIndex(Action) != INDEX_NONE)
+			{
+				return;     // already handled (added, or intentionally skipped) in step 1
+			}
+			AddListen(Action, INDEX_NONE);
+		};
+
+		for (const UInputMappingContext* Context : RecordedContexts)
+		{
+			if (!Context)
+			{
+				continue;
+			}
+			for (const FEnhancedActionKeyMapping& Mapping : Context->GetMappings())
+			{
+				ConsiderExtra(Mapping.Action);
+			}
+		}
+
+		for (const UInputAction* Action : AdditionalActions)
+		{
+			ConsiderExtra(Action);
+		}
+	}
+}
+
+void UInputReplayComponent::ResetMatchInputProgress()
+{
+	MatchCueCursor      = 0;
+	MatchClockSeconds   = 0.0f;
+	bMatchAwaitingInput = false;
+	bMatchEdgesPrimed   = false;
+	MatchOnsetIndices.Reset();
+
+	for (FMatchListenState& State : MatchListenStates)
+	{
+		State.bWasActive  = false;
+		State.LatestValue = FVector::ZeroVector;
+	}
+}
+
+void UInputReplayComponent::SampleMatchListenStates()
+{
+	MatchOnsetIndices.Reset();
+
+	UEnhancedPlayerInput* PlayerInput = GetEnhancedPlayerInput();
+	if (!PlayerInput)
+	{
+		return;
+	}
+
+	const float Threshold = FMath::Max(KINDA_SMALL_NUMBER, MatchCueOptions.PressThreshold);
+
+	for (int32 Index = 0; Index < MatchListenStates.Num(); ++Index)
+	{
+		FMatchListenState& State = MatchListenStates[Index];
+
+		const UInputAction* Action = State.Action.Get();
+		if (!Action)
+		{
+			continue;
+		}
+
+		// Quantise with the same step the recorder used, so a live value and a recorded value that
+		// represent the same physical input compare the same way.
+		State.LatestValue = Quantise(PlayerInput->GetActionValue(Action).Get<FVector>());
+
+		const bool bActive = State.LatestValue.Size() >= Threshold;
+
+		if (bActive && !State.bWasActive && bMatchEdgesPrimed)
+		{
+			MatchOnsetIndices.Add(Index);
+		}
+		State.bWasActive = bActive;
+	}
+
+	bMatchEdgesPrimed = true;
+}
+
+void UInputReplayComponent::TickMatchInput(float DeltaSeconds)
+{
+	// Refresh live edges FIRST, and unconditionally - including while an interval is still running.
+	// That is what stops a key the player is already leaning on from satisfying the next cue: the
+	// press was consumed as an onset on an earlier frame, so no new onset can fire until they let go.
+	SampleMatchListenStates();
+
+	if (!MatchCues.IsValidIndex(MatchCueCursor))
+	{
+		FinishMatchInput(/*bCompletedAllCues=*/true);
+		return;
+	}
+
+	const FMatchInputCue& Cue = MatchCues[MatchCueCursor];
+
+	// ---- Phase 1: run down the recorded interval ---------------------------------------------
+	if (!bMatchAwaitingInput)
+	{
+		MatchClockSeconds += DeltaSeconds;
+
+		if (MatchClockSeconds + KINDA_SMALL_NUMBER < Cue.TimeSeconds)
+		{
+			return;
+		}
+
+		bMatchAwaitingInput = true;
+		PresentCurrentMatchCue();
+	}
+
+	// ---- Phase 2: blocked on the live controller ---------------------------------------------
+	// MatchClockSeconds is frozen from here until the correct input arrives, so the interval to the
+	// cue after this one is measured from this cue's timestamp - not from when the player reacted.
+	for (const int32 ListenIndex : MatchOnsetIndices)
+	{
+		const FMatchListenState& State = MatchListenStates[ListenIndex];
+
+		const bool bSameAction = (State.RegistryIndex != INDEX_NONE && State.RegistryIndex == Cue.ActionIndex);
+		const bool bSatisfied  = bSameAction && UInputMatchLibrary::DoesValueSatisfyCue(
+			Cue, State.LatestValue, MatchCueOptions.PressThreshold, MatchDirectionTolerance);
+
+		if (bSatisfied)
+		{
+			if (bVerboseMatchLogging)
+			{
+				UE_LOG(LogInputMatch, Log, TEXT("MatchInput cue %d/%d matched: '%s'."),
+					MatchCueCursor + 1, MatchCues.Num(), *Cue.Description);
+			}
+
+			OnMatchInputMatched.Broadcast(MatchCueCursor, MatchCues.Num());
+			AdvanceMatchCue();
+
+			// One cue per frame. Two cues recorded on the same tick therefore need two separate
+			// presses, which is the right behaviour for a tutorial.
+			return;
+		}
+
+		// Everything else is a wrong input: same action pushed the wrong way, or a different action
+		// entirely. Both cases name the expectation and what actually arrived.
+		const FString ActualInput = DescribeListenState(State);
+
+		UE_LOG(LogInputMatch, Error,
+			TEXT("MatchInput MISMATCH on cue %d/%d (recorded at %.2fs): expected '%s' but the player pressed '%s'."),
+			MatchCueCursor + 1, MatchCues.Num(), Cue.TimeSeconds, *Cue.Description, *ActualInput);
+
+		OnMatchInputMismatch.Broadcast(Cue.Description, ActualInput);
+	}
+}
+
+void UInputReplayComponent::PresentCurrentMatchCue()
+{
+	if (!MatchCues.IsValidIndex(MatchCueCursor))
+	{
+		return;
+	}
+
+	const FMatchInputCue& Cue = MatchCues[MatchCueCursor];
+
+	if (bVerboseMatchLogging)
+	{
+		UE_LOG(LogInputMatch, Log,
+			TEXT("MatchInput cue %d/%d due at %.2fs (+%.2fs since the previous cue): waiting for '%s'."),
+			MatchCueCursor + 1, MatchCues.Num(), Cue.TimeSeconds, Cue.IntervalFromPreviousSeconds, *Cue.Description);
+	}
+
+	OnMatchInputCuePresented.Broadcast(MatchCueCursor, MatchCues.Num(), Cue.Description);
+}
+
+void UInputReplayComponent::AdvanceMatchCue()
+{
+	// Snap the clock onto the cue's own timestamp instead of keeping the overshoot. However long the
+	// player took to answer, the next wait is exactly NextCue.TimeSeconds - ThisCue.TimeSeconds.
+	MatchClockSeconds   = MatchCues[MatchCueCursor].TimeSeconds;
+	bMatchAwaitingInput = false;
+	++MatchCueCursor;
+
+	if (MatchCueCursor < MatchCues.Num())
+	{
+		return;
+	}
+
+	if (bLoopMatchInput)
+	{
+		UE_LOG(LogInputMatch, Log, TEXT("MatchInput sequence complete - looping from the first cue."));
+		ResetMatchInputProgress();
+		return;
+	}
+
+	FinishMatchInput(/*bCompletedAllCues=*/true);
+}
+
+FString UInputReplayComponent::DescribeListenState(const FMatchListenState& State) const
+{
+	FString Name = State.ActionName;
+	if (State.RegistryIndex == INDEX_NONE)
+	{
+		// Worth calling out explicitly: this input could never have matched, because the recording
+		// does not contain the action at all.
+		Name += TEXT(" (not present in this recording)");
+	}
+
+	return UInputMatchLibrary::DescribeInputValue(Name, State.ValueType, State.LatestValue);
+}
+
+FString UInputReplayComponent::GetExpectedInputDescription() const
+{
+	return MatchCues.IsValidIndex(MatchCueCursor) ? MatchCues[MatchCueCursor].Description : FString();
+}
+
+float UInputReplayComponent::GetTimeUntilNextCue() const
+{
+	if (bMatchAwaitingInput || !MatchCues.IsValidIndex(MatchCueCursor))
+	{
+		return 0.0f;
+	}
+
+	return FMath::Max(0.0f, MatchCues[MatchCueCursor].TimeSeconds - MatchClockSeconds);
+}
+
+float UInputReplayComponent::GetMatchProgress() const
+{
+	return (MatchCues.Num() > 0)
+		? FMath::Clamp(static_cast<float>(MatchCueCursor) / static_cast<float>(MatchCues.Num()), 0.0f, 1.0f)
+		: 0.0f;
 }

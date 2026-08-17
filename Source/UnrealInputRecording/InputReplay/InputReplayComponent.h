@@ -17,6 +17,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "InputMatchCue.h"
 #include "InputReplayTypes.h"
 
 #include "InputReplayComponent.generated.h"
@@ -32,6 +33,18 @@ DECLARE_LOG_CATEGORY_EXTERN(LogInputReplay, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInputReplayEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInputReplayDesync, int32, FrameIndex, float, PositionErrorCm, float, RotationErrorDeg);
+
+/** A cue has just become due; the system is now blocked until ExpectedInput is reproduced. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMatchInputCuePresented, int32, CueIndex, int32, TotalCues, const FString&, ExpectedInput);
+
+/** The live player reproduced the cue; the interval clock resumes. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMatchInputMatched, int32, CueIndex, int32, TotalCues);
+
+/** The live player pressed something else. Both descriptions are already formatted for display. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMatchInputMismatch, const FString&, ExpectedInput, const FString&, ActualInput);
+
+/** MatchInput ended. bCompletedAllCues distinguishes "player finished" from "someone called Stop". */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMatchInputFinished, bool, bCompletedAllCues);
 
 /**
  * Per-action bookkeeping used while recording. Runtime only - never serialised.
@@ -80,6 +93,32 @@ struct FPlaybackActionState
 
 	/** We held a press open past its recorded release to survive a frame hitch; release next frame. */
 	bool bReleasePending = false;
+};
+
+/**
+ * Per-action bookkeeping used while listening to the LIVE player in MatchInput mode. Runtime only.
+ *
+ * The listen set is deliberately wider than the recording's own action registry: if the player
+ * presses something that was never recorded we still want to name it in the mismatch log, and for
+ * that we have to be watching it.
+ */
+struct FMatchListenState
+{
+	/** The action being watched. */
+	TWeakObjectPtr<const UInputAction> Action;
+
+	/** Index into the recording's registry, or INDEX_NONE for actions the recording never saw. */
+	int32 RegistryIndex = INDEX_NONE;
+
+	/** Value magnitude cleared the press threshold on the previous frame. */
+	bool bWasActive = false;
+
+	/** Value sampled this frame, for the mismatch message. */
+	FVector LatestValue = FVector::ZeroVector;
+
+	/** Cached for formatting; avoids GetName() churn every frame. */
+	FString ActionName;
+	uint8 ValueType = 0;
 };
 
 UCLASS(ClassGroup = (Input), meta = (BlueprintSpawnableComponent), Blueprintable)
@@ -164,6 +203,43 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Playback")
 	bool bLoopPlayback = false;
 
+	//~ Begin MatchInput -------------------------------------------------------------------------
+
+	/**
+	 * Cue extraction rules for MatchInput mode: press threshold, de-duplication window and the
+	 * actions to ignore. Keep these identical to the ones on your UInputRecordingDataAsset if you
+	 * want the editor preview to match what the player is actually asked to press.
+	 *
+	 * For the Third Person template, add IA_Look (and IA_MouseLook if it is not already flagged as a
+	 * frame-delta action) to IgnoredActions - otherwise camera movement registers as wrong input.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
+	FMatchInputCueBuildOptions MatchCueOptions;
+
+	/**
+	 * How closely the live axis direction has to agree with the recorded one. A dot product, so
+	 * 1.0 = exact, 0.7 ~= within 45 degrees, 0.0 = any direction in the same half-plane.
+	 * Ignored for Boolean actions, which have no direction.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float MatchDirectionTolerance = 0.7f;
+
+	/**
+	 * Also watch every action reachable through RecordedContexts / AdditionalActions, not just the
+	 * ones in the recording. Costs nothing and makes the mismatch log able to name inputs the
+	 * recording never contained ("expected IA_Jump but received IA_Crouch").
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
+	bool bMatchListenToUnrecordedActions = true;
+
+	/** Restart from the first cue instead of finishing. Useful for a looping tutorial kiosk. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
+	bool bLoopMatchInput = false;
+
+	/** Log every cue and every successful match, not just mismatches. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
+	bool bVerboseMatchLogging = true;
+
 	//~ Begin Events -----------------------------------------------------------------------------
 
 	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
@@ -180,6 +256,21 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
 	FOnInputReplayDesync OnDesyncDetected;
+
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnInputReplayEvent OnMatchInputStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnMatchInputCuePresented OnMatchInputCuePresented;
+
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnMatchInputMatched OnMatchInputMatched;
+
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnMatchInputMismatch OnMatchInputMismatch;
+
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnMatchInputFinished OnMatchInputFinished;
 
 	//~ Begin Public API -------------------------------------------------------------------------
 
@@ -201,6 +292,52 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input Replay")
 	void StopPlayback();
 
+	//~ MatchInput ------------------------------------------------------------------------------
+
+	/**
+	 * Starts interactive "MatchInput" mode against the currently loaded recording.
+	 *
+	 * Nothing is injected and no mapping context is suppressed: this mode drives the *player*, not
+	 * the pawn. The component waits out the interval to the next recorded input, then blocks until
+	 * that exact input arrives from the live controller, logging an error for anything else.
+	 *
+	 * @return false if the component is busy, no recording is loaded, or the recording contains no
+	 *         discrete presses to match (e.g. a pure mouse-look capture).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Replay|Match Input")
+	bool StartMatchInput();
+
+	UFUNCTION(BlueprintCallable, Category = "Input Replay|Match Input")
+	void StopMatchInput();
+
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	bool IsMatchingInput() const { return Mode == EInputReplayMode::MatchInput; }
+
+	/** True while the interval has elapsed and we are blocked waiting on the live controller. */
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	bool IsAwaitingMatchInput() const { return Mode == EInputReplayMode::MatchInput && bMatchAwaitingInput; }
+
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	int32 GetMatchCueCount() const { return MatchCues.Num(); }
+
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	int32 GetCurrentMatchCueIndex() const { return MatchCueCursor; }
+
+	/** "IA_Jump [pressed]", or empty when no cue is pending. */
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	FString GetExpectedInputDescription() const;
+
+	/** Seconds still to run before the current cue becomes due. 0 while awaiting input. */
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	float GetTimeUntilNextCue() const;
+
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	float GetMatchProgress() const;
+
+	const TArray<FMatchInputCue>& GetMatchCues() const { return MatchCues; }
+
+	//~ Queries ---------------------------------------------------------------------------------
+
 	UFUNCTION(BlueprintPure, Category = "Input Replay")
 	EInputReplayMode GetMode() const { return Mode; }
 
@@ -211,12 +348,21 @@ public:
 	bool IsPlaying() const { return Mode == EInputReplayMode::Playing; }
 
 	UFUNCTION(BlueprintPure, Category = "Input Replay")
+	bool IsIdle() const { return Mode == EInputReplayMode::Idle; }
+
+	UFUNCTION(BlueprintPure, Category = "Input Replay")
 	int32 GetCurrentFrameIndex() const { return CurrentFrameIndex; }
 
 	UFUNCTION(BlueprintPure, Category = "Input Replay")
 	float GetPlaybackProgress() const;
 
 	const FInputRecording& GetRecording() const { return Recording; }
+
+	/**
+	 * Replaces the in-memory recording without touching the disk. Used by the subsystem to feed a
+	 * UInputRecordingDataAsset straight into playback or MatchInput.
+	 */
+	void SetRecording(const FInputRecording& InRecording);
 
 	//~ Begin PlayerController hooks -------------------------------------------------------------
 
@@ -264,6 +410,34 @@ private:
 
 	FVector Quantise(const FVector& In) const;
 
+	//~ MatchInput internals ---------------------------------------------------------------------
+
+	/** Derive the cue list from the loaded recording using MatchCueOptions. */
+	void BuildMatchInputCues();
+
+	/** Assemble the set of actions we sample from the live controller each frame. */
+	void BuildMatchListenList();
+
+	/** The whole MatchInput state machine; called once per frame from TickPostInput. */
+	void TickMatchInput(float DeltaSeconds);
+
+	/** Sample the live controller and refresh the press-onset edges in MatchListenStates. */
+	void SampleMatchListenStates();
+
+	/** Announce the cue we are now blocked on. */
+	void PresentCurrentMatchCue();
+
+	/** Consume the current cue and resume the interval clock at its timestamp. */
+	void AdvanceMatchCue();
+
+	/** Shared exit path. bCompletedAllCues is forwarded to OnMatchInputFinished. */
+	void FinishMatchInput(bool bCompletedAllCues);
+
+	/** Reset cursor/clock/edges back to the first cue. */
+	void ResetMatchInputProgress();
+
+	FString DescribeListenState(const FMatchListenState& State) const;
+
 	//~ State ------------------------------------------------------------------------------------
 
 	UPROPERTY(Transient)
@@ -305,6 +479,37 @@ private:
 	/** Contexts we removed for the duration of playback, so we can restore them verbatim. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UInputMappingContext>> SuppressedContexts;
+
+	//~ MatchInput state -------------------------------------------------------------------------
+
+	/** Ordered list of inputs the player has to reproduce. Rebuilt on every StartMatchInput. */
+	UPROPERTY(Transient)
+	TArray<FMatchInputCue> MatchCues;
+
+	/** Index of the cue we are currently counting down to / blocked on. */
+	int32 MatchCueCursor = 0;
+
+	/**
+	 * Position along the *recorded* timeline, in seconds. Advances with real time while counting
+	 * down an interval and freezes while we are blocked on the player, which is precisely what
+	 * "pause the input progression" means.
+	 */
+	float MatchClockSeconds = 0.0f;
+
+	/** The interval has elapsed and we are now waiting on the live controller. */
+	bool bMatchAwaitingInput = false;
+
+	/** Live-input edge detection, one entry per watched action. */
+	TArray<FMatchListenState> MatchListenStates;
+
+	/** Indices into MatchListenStates that saw a fresh press this frame. Reused to avoid churn. */
+	TArray<int32> MatchOnsetIndices;
+
+	/**
+	 * The first live sample after a reset only *primes* the edge detector. Without this, a key the
+	 * player already happens to be holding when MatchInput starts would read as a brand new press.
+	 */
+	bool bMatchEdgesPrimed = false;
 
 	/** GFrameCounter of the last frame the PlayerController hooks drove us (fallback detection). */
 	uint64 LastHookFrameCounter = 0;

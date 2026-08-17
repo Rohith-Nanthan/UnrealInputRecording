@@ -40,7 +40,14 @@ enum class EInputReplayMode : uint8
 {
 	Idle		UMETA(DisplayName = "Idle"),
 	Recording	UMETA(DisplayName = "Recording"),
-	Playing		UMETA(DisplayName = "Playing")
+	Playing		UMETA(DisplayName = "Playing"),
+
+	/**
+	 * Interactive tutorial / rhythm-game playback. Nothing is injected: the component walks the
+	 * recorded cue list, waits out the interval to the next cue, then blocks until the live player
+	 * reproduces that exact input. See UInputReplayComponent::StartMatchInput.
+	 */
+	MatchInput	UMETA(DisplayName = "Match Input")
 };
 
 /**

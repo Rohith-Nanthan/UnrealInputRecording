@@ -54,7 +54,20 @@ public:
 	UFUNCTION(Exec, BlueprintCallable, Category = "Input Replay")
 	void ReplayLoadAndPlay(const FString& FileName = TEXT("Recording01"));
 
-	/** Console: "ReplayStop" */
+	/**
+	 * Console: "ReplayMatchInput Lap01"
+	 *
+	 * Loads a recording and starts interactive MatchInput mode: the system waits out the interval to
+	 * each recorded input, then blocks until you physically press that same input, logging an error
+	 * naming both the expected and the actual input for anything else.
+	 *
+	 * Routed through UInputRecordingSubsystem so that UI bound to the subsystem's events updates
+	 * too - starting a session straight from the component would bypass those relays.
+	 */
+	UFUNCTION(Exec, BlueprintCallable, Category = "Input Replay")
+	void ReplayMatchInput(const FString& FileName = TEXT("Recording01"));
+
+	/** Console: "ReplayStop" - stops recording, playback or MatchInput, whichever is running. */
 	UFUNCTION(Exec, BlueprintCallable, Category = "Input Replay")
 	void ReplayStop();
 

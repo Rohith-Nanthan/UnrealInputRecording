@@ -2,6 +2,8 @@
 
 #include "ReplayPlayerController.h"
 
+#include "Engine/GameInstance.h"
+#include "InputRecordingSubsystem.h"
 #include "InputReplayComponent.h"
 
 AReplayPlayerController::AReplayPlayerController()
@@ -56,6 +58,31 @@ void AReplayPlayerController::ReplayLoadAndPlay(const FString& FileName)
 	}
 }
 
+void AReplayPlayerController::ReplayMatchInput(const FString& FileName)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	UInputRecordingSubsystem* Subsystem = GameInstance ? GameInstance->GetSubsystem<UInputRecordingSubsystem>() : nullptr;
+
+	if (Subsystem)
+	{
+		// Make sure the subsystem is pointed at *this* controller's component before it resolves one
+		// by search - relevant with splitscreen or a spare component elsewhere in the level.
+		if (ReplayComponent)
+		{
+			Subsystem->SetReplayComponent(ReplayComponent);
+		}
+
+		Subsystem->StartMatchInputMode(FileName);
+		return;
+	}
+
+	// Subsystem unavailable (very early startup): fall back to driving the component directly.
+	if (ReplayComponent && ReplayComponent->LoadRecordingFromFile(FileName, /*bAsJson=*/false))
+	{
+		ReplayComponent->StartMatchInput();
+	}
+}
+
 void AReplayPlayerController::ReplayStop()
 {
 	if (!ReplayComponent)
@@ -70,6 +97,10 @@ void AReplayPlayerController::ReplayStop()
 	else if (ReplayComponent->IsRecording())
 	{
 		ReplayComponent->StopRecording();
+	}
+	else if (ReplayComponent->IsMatchingInput())
+	{
+		ReplayComponent->StopMatchInput();
 	}
 }
 
