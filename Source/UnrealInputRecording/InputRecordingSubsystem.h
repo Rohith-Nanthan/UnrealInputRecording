@@ -19,7 +19,9 @@
 
 #pragma once
 
+#include "Containers/Ticker.h"
 #include "CoreMinimal.h"
+#include "InputReplay/InputMatchCue.h"
 #include "InputReplay/InputReplayComponent.h"
 #include "InputReplay/InputReplayTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
@@ -28,9 +30,14 @@
 
 class APlayerController;
 class UInputRecordingDataAsset;
+class UInputRecordingScreenRecorder;
+class UInputRecordingVideoPlayer;
 
 /** Fired whenever the underlying component changes mode. Drives button enable/disable in the UI. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInputRecordingModeChanged, EInputReplayMode, NewMode);
+
+/** A take's .mp4 finished writing. bSuccess is false when capture never started or the encoder failed. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInputRecordingVideoSaved, bool, bSuccess, const FString&, VideoPath);
 
 UCLASS()
 class UNREALINPUTRECORDING_API UInputRecordingSubsystem : public UGameInstanceSubsystem
@@ -174,6 +181,51 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Input Recording|Match Input")
 	int32 GetCurrentMatchCueIndex() const;
 
+	/**
+	 * Position along the recorded timeline, in seconds - the clock that freezes while MatchInput waits.
+	 * This is what the video playhead and the timeline progress bar both follow.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Match Input")
+	float GetMatchClockSeconds() const;
+
+	/** The full cue list for the loaded recording. The UI uses it to lay out its timeline markers. */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|Match Input")
+	TArray<FMatchInputCue> GetMatchCues() const;
+
+	/** Wall-clock length of the loaded recording. Horizontal scale for anything drawing the timeline. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording")
+	float GetRecordingDurationSeconds() const;
+
+	// -----------------------------------------------------------------------------------------
+	// Video
+	// -----------------------------------------------------------------------------------------
+
+	/**
+	 * Screen capture, paired with the .ghost by file name. Created on first use.
+	 * StartRecording drives this automatically; reach for it directly only to tune Options mid-session.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Video")
+	UInputRecordingScreenRecorder* GetScreenRecorder();
+
+	/**
+	 * Playback of the recorded .mp4, with its playhead bound to the MatchInput clock. Created on first
+	 * use, so a widget can call GetMediaTexture() on it before any session has started.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Video")
+	UInputRecordingVideoPlayer* GetVideoPlayer();
+
+	/** True if a .mp4 exists for this recording name. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Video")
+	bool HasVideoForRecording(const FString& FileName) const;
+
+	/** Capture the viewport to an .mp4 alongside the .ghost. Seeded from the project settings. */
+	UPROPERTY(BlueprintReadWrite, Category = "Input Recording|Video")
+	bool bCaptureVideoWithRecording = true;
+
+	/** Open and drive the paired .mp4 when a MatchInput session starts. */
+	UPROPERTY(BlueprintReadWrite, Category = "Input Recording|Video")
+	bool bPlayVideoDuringMatchInput = true;
+
 	/** Wrong presses so far this MatchInput session. */
 	UFUNCTION(BlueprintPure, Category = "Input Recording|Match Input")
 	int32 GetMismatchCount() const { return MismatchCount; }
@@ -220,6 +272,9 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
 	FOnMatchInputFinished OnMatchInputFinished;
 
+	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
+	FOnInputRecordingVideoSaved OnVideoSaved;
+
 	// -----------------------------------------------------------------------------------------
 	// Session state
 	// -----------------------------------------------------------------------------------------
@@ -247,6 +302,17 @@ private:
 
 	void BroadcastModeChanged();
 
+	//~ Video -----------------------------------------------------------------------------------
+
+	/**
+	 * Per-frame drift correction for the video playhead.
+	 *
+	 * A GameInstanceSubsystem does not tick, and the pause/resume events alone cannot keep a media
+	 * player's own clock in step with a clock that keeps stopping. One ticker delegate is cheaper than
+	 * making the subsystem tickable, and it means the sync works whether or not the UI widget is up.
+	 */
+	bool TickVideoSync(float DeltaSeconds);
+
 	//~ Component event relays ------------------------------------------------------------------
 
 	UFUNCTION() void HandleRecordingStarted();
@@ -266,6 +332,18 @@ private:
 	 * a dead controller alive across a level change.
 	 */
 	TWeakObjectPtr<UInputReplayComponent> CachedReplayComponent;
+
+	/**
+	 * Hard references, unlike the component: these are owned by the subsystem and are meant to outlive
+	 * level changes so a recording can be reviewed after travelling.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UInputRecordingScreenRecorder> ScreenRecorder;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputRecordingVideoPlayer> VideoPlayer;
+
+	FTSTicker::FDelegateHandle VideoSyncTickerHandle;
 
 	/** Last mode we told listeners about, so OnModeChanged only fires on real transitions. */
 	EInputReplayMode LastBroadcastMode = EInputReplayMode::Idle;

@@ -18,6 +18,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "InputReplay/InputMatchCue.h"
 #include "InputReplay/InputReplayTypes.h"
+#include "Video/InputRecordingVideoTypes.h"
 
 #include "InputRecordingSettings.generated.h"
 
@@ -86,6 +87,34 @@ public:
 	/** Axis direction agreement required to satisfy a cue. Dot product; 0.7 ~= within 45 degrees. */
 	UPROPERTY(config, EditAnywhere, Category = "Match Input", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float MatchDirectionTolerance = 0.7f;
+
+	//~ Video -----------------------------------------------------------------------------------
+
+	/**
+	 * Capture the viewport to an .mp4 alongside every .ghost.
+	 *
+	 * The two files share a bare name, which is the whole pairing mechanism. Turning this off costs
+	 * nothing else - MatchInput runs identically, just without a video panel.
+	 *
+	 * Requires the Media IO Framework plugin, and a viewport UMediaCapture can resolve: run Standalone
+	 * or set Play In to "New Editor Window". Capture is skipped with a warning otherwise.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Video")
+	bool bCaptureVideoWithRecording = true;
+
+	/** Open and drive the paired .mp4 when a MatchInput session starts. */
+	UPROPERTY(config, EditAnywhere, Category = "Video")
+	bool bPlayVideoDuringMatchInput = true;
+
+	/**
+	 * Capture the composited back buffer rather than the rendered viewport, so the HUD and any other
+	 * Slate on top appears in the video. Usually what you want for a tutorial the player watches back.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Video")
+	bool bCaptureVideoIncludingUI = false;
+
+	UPROPERTY(config, EditAnywhere, Category = "Video")
+	FInputRecordingVideoOptions VideoOptions;
 
 	//~ Subsystem -------------------------------------------------------------------------------
 

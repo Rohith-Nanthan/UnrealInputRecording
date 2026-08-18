@@ -5,6 +5,7 @@
 #include "EngineUtils.h"                            // TActorIterator
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "HAL/FileManager.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "InputRecordingSettings.h"
@@ -12,6 +13,9 @@
 #include "InputReplay/InputRecordingAssetTools.h"
 #include "InputReplay/InputRecordingDataAsset.h"
 #include "InputReplay/InputReplaySerializer.h"
+#include "Video/InputRecordingScreenRecorder.h"
+#include "Video/InputRecordingVideoPlayer.h"
+#include "Video/InputRecordingVideoTypes.h"
 
 // ---------------------------------------------------------------------------------------------
 // Lifetime
@@ -24,15 +28,45 @@ void UInputRecordingSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
 	{
 		ActiveRecordingName = Settings->DefaultRecordingName;
+		bCaptureVideoWithRecording = Settings->bCaptureVideoWithRecording;
+		bPlayVideoDuringMatchInput = Settings->bPlayVideoDuringMatchInput;
 	}
+
+	// The video playhead has to be corrected every frame, and a GameInstanceSubsystem does not tick.
+	// Registering here rather than making the widget responsible means sync is correct even with no UI
+	// on screen - a console-driven MatchInput session still gets a synchronised video.
+	VideoSyncTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &UInputRecordingSubsystem::TickVideoSync));
 
 	// No component resolution here on purpose: a GameInstance subsystem initialises before there is
 	// a world or a local player. Resolution is lazy, on first use.
-	UE_LOG(LogInputReplay, Log, TEXT("InputRecordingSubsystem ready (default recording '%s')."), *ActiveRecordingName);
+	UE_LOG(LogInputReplay, Log, TEXT("InputRecordingSubsystem ready (default recording '%s', video %s)."),
+		*ActiveRecordingName,
+		UInputRecordingVideoLibrary::IsVideoCaptureSupported() ? TEXT("supported") : TEXT("unavailable on this platform"));
 }
 
 void UInputRecordingSubsystem::Deinitialize()
 {
+	if (VideoSyncTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(VideoSyncTickerHandle);
+		VideoSyncTickerHandle.Reset();
+	}
+
+	// Stopping capture before teardown matters more than it looks: an unfinalised .mp4 has no index and
+	// will not open, so a capture abandoned at shutdown would leave an unplayable file on disk.
+	if (ScreenRecorder)
+	{
+		ScreenRecorder->StopCapture();
+		ScreenRecorder = nullptr;
+	}
+
+	if (VideoPlayer)
+	{
+		VideoPlayer->Close();
+		VideoPlayer = nullptr;
+	}
+
 	if (UInputReplayComponent* Component = CachedReplayComponent.Get())
 	{
 		UnbindFromComponent(Component);
@@ -40,6 +74,59 @@ void UInputRecordingSubsystem::Deinitialize()
 	CachedReplayComponent.Reset();
 
 	Super::Deinitialize();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Video helpers
+// ---------------------------------------------------------------------------------------------
+
+UInputRecordingScreenRecorder* UInputRecordingSubsystem::GetScreenRecorder()
+{
+	if (!ScreenRecorder)
+	{
+		ScreenRecorder = NewObject<UInputRecordingScreenRecorder>(this);
+
+		if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
+		{
+			ScreenRecorder->Options = Settings->VideoOptions;
+			ScreenRecorder->bCaptureIncludingUI = Settings->bCaptureVideoIncludingUI;
+		}
+	}
+
+	return ScreenRecorder;
+}
+
+UInputRecordingVideoPlayer* UInputRecordingSubsystem::GetVideoPlayer()
+{
+	if (!VideoPlayer)
+	{
+		VideoPlayer = NewObject<UInputRecordingVideoPlayer>(this);
+	}
+
+	return VideoPlayer;
+}
+
+bool UInputRecordingSubsystem::HasVideoForRecording(const FString& FileName) const
+{
+	return UInputRecordingVideoLibrary::DoesVideoExist(ResolveRecordingName(FileName));
+}
+
+bool UInputRecordingSubsystem::TickVideoSync(float DeltaSeconds)
+{
+	if (VideoPlayer && VideoPlayer->IsVideoReady())
+	{
+		if (const UInputReplayComponent* Component = FindReplayComponent())
+		{
+			if (Component->IsMatchingInput())
+			{
+				VideoPlayer->SyncToMatchClock(
+					Component->GetMatchClockSeconds(), Component->IsAwaitingMatchInput());
+			}
+		}
+	}
+
+	// Keep ticking for the subsystem's lifetime; Deinitialize removes the handle.
+	return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -296,6 +383,16 @@ bool UInputRecordingSubsystem::StartRecording(const FString& DisplayName)
 			TEXT("Contexts on the component, or set them in Project Settings > Game > Input Recording."));
 	}
 
+	// Video starts only once input recording is definitely running, so a failed take never leaves an
+	// orphan .mp4 behind. The reverse ordering is deliberately *not* used: a video with no .ghost is
+	// useless to this system, whereas a .ghost with no video degrades gracefully everywhere.
+	if (bStarted && bCaptureVideoWithRecording)
+	{
+		// The name capture starts under is ActiveRecordingName; if StopRecordingAndSave is later given a
+		// different one, RenameCapturedVideo moves the file so the pair stays intact.
+		GetScreenRecorder()->StartCapture(this, ResolveRecordingName(ActiveRecordingName));
+	}
+
 	BroadcastModeChanged();
 	return bStarted;
 }
@@ -324,6 +421,19 @@ bool UInputRecordingSubsystem::StopRecordingAndSave(const FString& FileName, boo
 	const FString Name = ResolveRecordingName(FileName);
 	ActiveRecordingName = Name;
 
+	// Stop the video first. StopCapture blocks until the encoder drains and writes the MP4 index, so by
+	// the time the .ghost lands below, both halves of the pair are complete on disk.
+	if (ScreenRecorder && ScreenRecorder->IsCapturing())
+	{
+		ScreenRecorder->StopCapture();
+		ScreenRecorder->RenameCapturedVideo(Name);
+
+		const bool bVideoOk = (ScreenRecorder->GetState() != EInputRecordingVideoState::Failed)
+			&& UInputRecordingVideoLibrary::DoesVideoExist(Name);
+
+		OnVideoSaved.Broadcast(bVideoOk, ScreenRecorder->GetOutputPath());
+	}
+
 	const bool bSaved = Component->SaveRecordingToFile(Name, bAsJson);
 
 	// Writing the readable companion copy by default is what makes the Data Asset workflow painless:
@@ -349,6 +459,16 @@ void UInputRecordingSubsystem::StopRecordingWithoutSaving()
 	if (UInputReplayComponent* Component = FindReplayComponent())
 	{
 		Component->StopRecording();
+
+		// The .ghost is being thrown away, so the .mp4 has to go too - leaving it would pair a stale
+		// video with whatever recording is saved under this name next.
+		if (ScreenRecorder && ScreenRecorder->IsCapturing())
+		{
+			const FString AbandonedPath = ScreenRecorder->GetOutputPath();
+			ScreenRecorder->StopCapture();
+			IFileManager::Get().Delete(*AbandonedPath, /*RequireExists=*/false, /*EvenReadOnly=*/true);
+		}
+
 		BroadcastModeChanged();
 	}
 }
@@ -391,6 +511,13 @@ bool UInputRecordingSubsystem::StartMatchInputMode(const FString& FileName, bool
 	MismatchCount = 0;
 	LastMismatchDescription.Reset();
 
+	// Opened before the session starts, not after: opening is asynchronous, and giving the media player
+	// a head start means the first frame is usually decoded by the time the first cue is due.
+	if (bPlayVideoDuringMatchInput)
+	{
+		GetVideoPlayer()->OpenRecordingVideo(Name);
+	}
+
 	const bool bStarted = Component->StartMatchInput();
 	BroadcastModeChanged();
 	return bStarted;
@@ -425,6 +552,13 @@ bool UInputRecordingSubsystem::StartMatchInputModeFromAsset(UInputRecordingDataA
 	ActiveRecordingName = RecordingAsset->SourceFileName;
 	MismatchCount = 0;
 	LastMismatchDescription.Reset();
+
+	// The asset caches the recording, but the .mp4 still lives on disk next to the .ghost that asset was
+	// imported from - SourceFileName is what pairs them.
+	if (bPlayVideoDuringMatchInput && !ActiveRecordingName.IsEmpty())
+	{
+		GetVideoPlayer()->OpenRecordingVideo(ActiveRecordingName);
+	}
 
 	const bool bStarted = Component->StartMatchInput();
 	BroadcastModeChanged();
@@ -505,6 +639,10 @@ void UInputRecordingSubsystem::StopAll()
 
 	case EInputReplayMode::MatchInput:
 		Component->StopMatchInput();
+		if (VideoPlayer)
+		{
+			VideoPlayer->Close();
+		}
 		break;
 
 	default:
@@ -564,6 +702,24 @@ int32 UInputRecordingSubsystem::GetCurrentMatchCueIndex() const
 {
 	const UInputReplayComponent* Component = FindReplayComponent();
 	return Component ? Component->GetCurrentMatchCueIndex() : 0;
+}
+
+float UInputRecordingSubsystem::GetMatchClockSeconds() const
+{
+	const UInputReplayComponent* Component = FindReplayComponent();
+	return Component ? Component->GetMatchClockSeconds() : 0.0f;
+}
+
+TArray<FMatchInputCue> UInputRecordingSubsystem::GetMatchCues() const
+{
+	const UInputReplayComponent* Component = FindReplayComponent();
+	return Component ? Component->GetMatchCues() : TArray<FMatchInputCue>();
+}
+
+float UInputRecordingSubsystem::GetRecordingDurationSeconds() const
+{
+	const UInputReplayComponent* Component = FindReplayComponent();
+	return Component ? Component->GetRecording().GetDurationSeconds() : 0.0f;
 }
 
 TArray<FString> UInputRecordingSubsystem::GetAvailableRecordings(bool bJson) const
@@ -645,15 +801,42 @@ void UInputRecordingSubsystem::HandleRecordingStarted()	{ BroadcastModeChanged()
 void UInputRecordingSubsystem::HandleRecordingStopped()	{ BroadcastModeChanged(); }
 void UInputRecordingSubsystem::HandlePlaybackStarted()	{ BroadcastModeChanged(); }
 void UInputRecordingSubsystem::HandlePlaybackFinished()	{ BroadcastModeChanged(); }
-void UInputRecordingSubsystem::HandleMatchInputStarted()	{ BroadcastModeChanged(); }
+
+void UInputRecordingSubsystem::HandleMatchInputStarted()
+{
+	// The session's clock is back at zero, so the video has to be too - a restart after a completed run
+	// would otherwise resume from wherever the last one left it.
+	if (VideoPlayer && VideoPlayer->IsVideoOpen())
+	{
+		VideoPlayer->RestartFromBeginning();
+		VideoPlayer->ResumeVideo();
+	}
+
+	BroadcastModeChanged();
+}
 
 void UInputRecordingSubsystem::HandleMatchCuePresented(int32 CueIndex, int32 TotalCues, const FString& ExpectedInput)
 {
+	// The cue is due and the clock has frozen. Pausing here rather than waiting for the next sync tick
+	// is what makes the video stop on the right frame instead of a frame or two past it.
+	if (VideoPlayer)
+	{
+		VideoPlayer->PauseVideo();
+	}
+
 	OnMatchCuePresented.Broadcast(CueIndex, TotalCues, ExpectedInput);
 }
 
 void UInputRecordingSubsystem::HandleMatchInputMatched(int32 CueIndex, int32 TotalCues)
 {
+	// The one and only thing that restarts the video. Note there is no counterpart in
+	// HandleMatchInputMismatch: a wrong press leaves the video exactly where it is, which is the
+	// behaviour the tutorial wants.
+	if (VideoPlayer)
+	{
+		VideoPlayer->ResumeVideo();
+	}
+
 	OnMatchInputMatched.Broadcast(CueIndex, TotalCues);
 }
 
@@ -667,6 +850,13 @@ void UInputRecordingSubsystem::HandleMatchInputMismatch(const FString& ExpectedI
 
 void UInputRecordingSubsystem::HandleMatchInputFinished(bool bCompletedAllCues)
 {
+	// Paused rather than closed: the UI usually wants to keep showing the final frame, and a widget
+	// still holding the media texture should not have it cleared out from under it. StopAll() closes.
+	if (VideoPlayer)
+	{
+		VideoPlayer->PauseVideo();
+	}
+
 	OnMatchInputFinished.Broadcast(bCompletedAllCues);
 	BroadcastModeChanged();
 }

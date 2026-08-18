@@ -334,6 +334,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
 	float GetMatchProgress() const;
 
+	/**
+	 * Position along the recorded timeline, in seconds.
+	 *
+	 * This is the clock synchronised video playback binds to: it advances with real time while an
+	 * interval counts down and freezes the instant a cue becomes due, staying frozen for however long
+	 * the player takes - and through however many wrong presses. Anything that should "wait with" the
+	 * MatchInput system should follow this rather than keeping its own timer.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
+	float GetMatchClockSeconds() const { return MatchClockSeconds; }
+
 	const TArray<FMatchInputCue>& GetMatchCues() const { return MatchCues; }
 
 	//~ Queries ---------------------------------------------------------------------------------

@@ -36,6 +36,14 @@
 		{
 			"Name": "Terminal",
 			"Enabled": true
+		},
+		{
+			"Name": "MediaIOFramework",
+			"Enabled": true
+		},
+		{
+			"Name": "WmfMedia",
+			"Enabled": true
 		}
 	]
 }
