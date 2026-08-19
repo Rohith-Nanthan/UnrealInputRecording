@@ -12,6 +12,7 @@
 #include "Input/RecordingUIInputConfig.h"
 #include "InputRecordingSettings.h"
 #include "InputRecordingSubsystem.h"
+#include "InputReplay/InputReplayComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Storage/RecordingStore.h"
 
@@ -108,6 +109,40 @@ void AControlRecapPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRe
 	Super::EndPlay(EndPlayReason);
 }
 
+UInputReplayComponent* AControlRecapPlayerController::ResolveReplayComponent()
+{
+	// Re-resolve if it went away: the subsystem owns the component's lifetime, not this controller.
+	if (!CachedReplayComponent)
+	{
+		CachedReplayComponent = FindComponentByClass<UInputReplayComponent>();
+	}
+
+	return CachedReplayComponent;
+}
+
+void AControlRecapPlayerController::PreProcessInput(const float DeltaTime, const bool bGamePaused)
+{
+	Super::PreProcessInput(DeltaTime, bGamePaused);
+
+	// Inject BEFORE ProcessInputStack so the values land in this frame's evaluation.
+	if (UInputReplayComponent* Component = ResolveReplayComponent())
+	{
+		Component->TickPreInput(DeltaTime, bGamePaused);
+	}
+}
+
+void AControlRecapPlayerController::PostProcessInput(const float DeltaTime, const bool bGamePaused)
+{
+	Super::PostProcessInput(DeltaTime, bGamePaused);
+
+	// Sample AFTER ProcessInputStack so modifiers and triggers have been applied - this is the read
+	// that decides whether the viewer pressed the right thing.
+	if (UInputReplayComponent* Component = ResolveReplayComponent())
+	{
+		Component->TickPostInput(DeltaTime, bGamePaused);
+	}
+}
+
 void AControlRecapPlayerController::ApplyRecapInputLock()
 {
 	// Freeze the pawn rather than the input stack. See the header: MatchInput still needs Enhanced
@@ -144,15 +179,20 @@ bool AControlRecapPlayerController::ResolveSessionToReview(FRecordingSessionInfo
 	// which is exactly what the Test button just did - would otherwise be invisible here.
 	Store->Rescan();
 
-	// 1. A level that pins itself to one take.
-	if (const AControlRecapGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<AControlRecapGameMode>() : nullptr)
+	// 1. -IR=1. Skips the game mode's pin entirely: the flag means "review what I just recorded",
+	//    and a level pinned to some older take would make that flag do nothing visible.
+	if (RecordingBootFlags::ShouldForceMostRecentSession())
 	{
-		if (!GameMode->ForcedSessionFolder.IsEmpty()
-			&& Store->FindSessionByFolder(GameMode->ForcedSessionFolder, OutSession))
+		if (Store->GetMostRecentSession(OutSession))
 		{
-			UE_LOG(LogRecordingStore, Log, TEXT("Reviewing %s, pinned by the game mode."), *OutSession.FolderName);
-			return OutSession.IsPlayable();
+			UE_LOG(LogRecordingStore, Log, TEXT("Reviewing %s: -IR=1 forced the most recent session."),
+				*OutSession.FolderName);
+			return true;
 		}
+
+		UE_LOG(LogRecordingStore, Warning,
+			TEXT("-IR=1 asked for the most recent session and the store is empty."));
+		return false;
 	}
 
 	// 2. -ControlRecap=Recording_5
@@ -170,7 +210,18 @@ bool AControlRecapPlayerController::ResolveSessionToReview(FRecordingSessionInfo
 			TEXT("most recent one."), *RequestedFolder);
 	}
 
-	// 3. Whatever was touched last.
+	// 3. A level that pins itself to one take.
+	if (const AControlRecapGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<AControlRecapGameMode>() : nullptr)
+	{
+		if (!GameMode->ForcedSessionFolder.IsEmpty()
+			&& Store->FindSessionByFolder(GameMode->ForcedSessionFolder, OutSession))
+		{
+			UE_LOG(LogRecordingStore, Log, TEXT("Reviewing %s, pinned by the game mode."), *OutSession.FolderName);
+			return OutSession.IsPlayable();
+		}
+	}
+
+	// 4. Whatever was touched last.
 	if (Store->GetMostRecentSession(OutSession))
 	{
 		UE_LOG(LogRecordingStore, Log, TEXT("Reviewing %s, the most recently updated session."), *OutSession.FolderName);

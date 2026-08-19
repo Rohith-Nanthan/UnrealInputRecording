@@ -224,19 +224,54 @@ focus while the player is still driving is a nuisance).
 
 ```
 UnrealInputRecording.exe                            normal boot, gameplay map
-UnrealInputRecording.exe -ControlRecap              boot into the recap map, most recent session
+UnrealInputRecording.exe -IR=0                      normal boot, said explicitly
+UnrealInputRecording.exe -IR=1                      recap map, most recent session
+UnrealInputRecording.exe -ControlRecap              recap map, most recent session
 UnrealInputRecording.exe -ControlRecap=Recording_5  that session (a bare "5" also works)
+UnrealInputRecording.exe -IR=1 -ControlRecap=5      recap map, that session
 UnrealInputRecording.exe -RecordingRoot=D:/Takes    read sessions from elsewhere
 ```
+
+`-IR=<n>` is the short form and `-ControlRecap` the explicit one; either alone boots the recap map.
+`-IR` exists so a shortcut or a CI job flips between the two boot paths by changing one character,
+which is also why `-IR=0` is spelled out as a value rather than left as "just omit the flag": a
+launcher that always appends `-IR=<n>` needs a value meaning *boot the game normally*. An explicit
+`-IR=0` also **suppresses** `-ControlRecap`, so that launcher can override a shortcut with the long
+flag baked in. A bare `-IR` reads as `-IR=1`.
 
 The flag rewrites `GameDefaultMap` during module startup, before the engine picks a map to load, so
 the recap map is simply the map the game boots — nothing loads twice and no frame of the gameplay
 level is shown. A fallback travel is registered on `PostLoadMapWithWorld` in case module startup ever
 runs after the engine has already resolved its startup map; it does nothing when the override worked.
 
-Session resolution in the recap map: the game mode's `ForcedSessionFolder`, then `-ControlRecap=`,
-then the most recently updated *playable* session. "Playable" matters — a folder whose `.ghost` never
-finished writing is newer than everything and would otherwise win every time.
+Session resolution in the recap map, in order:
+
+1. `-IR=1` on its own — forces the most recently updated session and skips everything below it.
+2. `-ControlRecap=<folder>`.
+3. The game mode's `ForcedSessionFolder`, if the level pins one.
+4. The most recently updated *playable* session.
+
+The command line outranks the level's own pin on purpose: the pin is a design-time choice baked into
+a map, and someone typing a flag into a terminal is deliberately overriding it for this run. That is
+also why `-IR=1` skips the pin outright — the flag means "review what I just recorded", and a level
+pinned to an older take would make it do nothing visible.
+
+"Playable" matters at step 4 — a folder whose `.ghost` never finished writing is newer than
+everything and would otherwise win every time.
+
+Blueprint gets the same answers through the **Recording Boot Flags** function library (`Get Boot
+Mode`, `Is Control Recap Boot`, `Should Force Most Recent Session`, `Get Requested Session Folder`,
+`Describe Boot Flags`) — a main menu that shows a "Review last recording" button only in recap
+builds, or a HUD that hides itself there, cannot reach a C++ namespace.
+
+### Running uncooked
+
+The monolithic `UnrealInputRecording.exe` in `Binaries/Win64` needs cooked shaders, so before the
+project is packaged, drive the same boot path through the editor executable in game mode:
+
+```
+UnrealEditor.exe <path>\UnrealInputRecording.uproject -game -IR=1 -windowed
+```
 
 ---
 

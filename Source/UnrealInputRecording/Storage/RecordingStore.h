@@ -113,15 +113,19 @@ public:
 	 * @return an invalid session if the folder could not be created, or if ReserveBytes cannot be
 	 *         made to fit even with everything evictable gone. Recording must not start either way.
 	 */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	FRecordingSessionInfo BeginSession(const FString& DisplayName, const FString& MapName, int64 ReserveBytes);
 
 	/** Writes the manifest, refreshes sizes, unpins, then trims. Call once the files are on disk. */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	bool CommitSession(int32 Index, float DurationSeconds, int32 CueCount);
 
 	/** Deletes the folder outright. For a take that failed before producing anything usable. */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	void AbortSession(int32 Index);
 
 	/** Bumps UpdatedUtc so replaying a take protects it from eviction. */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	void TouchSession(int32 Index);
 
 	// -----------------------------------------------------------------------------------------
@@ -134,11 +138,17 @@ public:
 	 *
 	 * @return how many sessions were deleted.
 	 */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	int32 TrimToQuota(int64 ExtraReservation);
 
 	/** A pinned session is never evicted: the take being written, and the one being replayed. */
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	void PinSession(int32 Index);
+
+	UFUNCTION(BlueprintCallable, Category = "Recording Store")
 	void UnpinSession(int32 Index);
+
+	UFUNCTION(BlueprintPure, Category = "Recording Store")
 	bool IsPinned(int32 Index) const { return PinnedIndices.Contains(Index); }
 
 	// -----------------------------------------------------------------------------------------

@@ -22,38 +22,179 @@ namespace
 		const FString AssetName = MapPath.GetAssetName();
 		return AssetName.IsEmpty() ? MapPath.ToString() : AssetName;
 	}
+
+	/**
+	 * Exact "-Switch=Value" lookup.
+	 *
+	 * FParse::Value would be the one-liner, but it substring-matches: asking it for "IR=" also finds
+	 * the tail of "-SomeDir=..." and hands back that path. A two-letter switch name makes that a real
+	 * collision rather than a theoretical one, so this walks whole tokens and compares the key.
+	 */
+	bool FindSwitchValue(const TCHAR* CmdLine, const TCHAR* SwitchName, FString& OutValue)
+	{
+		const TCHAR* Cursor = CmdLine;
+
+		FString Token;
+		while (FParse::Token(Cursor, Token, /*bUseEscape=*/false))
+		{
+			Token.TrimStartAndEndInline();
+			if (Token.IsEmpty())
+			{
+				continue;
+			}
+
+			if (Token[0] == TEXT('-') || Token[0] == TEXT('/'))
+			{
+				Token = Token.RightChop(1);
+			}
+
+			FString Key;
+			FString Value;
+			if (Token.Split(TEXT("="), &Key, &Value) && Key.TrimStartAndEnd().Equals(SwitchName, ESearchCase::IgnoreCase))
+			{
+				// Trailing quotes survive tokenisation of -IR="1"; nobody writes that, but a batch
+				// file that builds the command line from a variable does.
+				OutValue = Value.TrimStartAndEnd().TrimQuotes();
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/** Everything the command line said about booting, parsed once. */
+	struct FBootFlagState
+	{
+		ERecordingBootMode Mode = ERecordingBootMode::Normal;
+		bool bModeSpecified = false;
+		bool bControlRecapSwitch = false;
+		FString RequestedFolder;
+	};
+
+	FBootFlagState ParseBootFlags()
+	{
+		FBootFlagState State;
+		const TCHAR* CmdLine = FCommandLine::Get();
+
+		// -IR=<n>, with a bare -IR reading as -IR=1. Anything unparseable is a typo in a shortcut
+		// somebody will stare at for ten minutes, so it warns rather than silently booting normally.
+		FString RawMode;
+		if (FindSwitchValue(CmdLine, TEXT("IR"), RawMode))
+		{
+			State.bModeSpecified = true;
+
+			if (RawMode.IsEmpty() || RawMode.Equals(TEXT("1")) || RawMode.Equals(TEXT("true"), ESearchCase::IgnoreCase)
+				|| RawMode.Equals(TEXT("recap"), ESearchCase::IgnoreCase))
+			{
+				State.Mode = ERecordingBootMode::ControlRecap;
+			}
+			else if (RawMode.Equals(TEXT("0")) || RawMode.Equals(TEXT("false"), ESearchCase::IgnoreCase))
+			{
+				State.Mode = ERecordingBootMode::Normal;
+			}
+			else
+			{
+				UE_LOG(LogRecordingStore, Warning,
+					TEXT("-IR=%s is not a boot mode. Use -IR=0 for the gameplay map or -IR=1 for the ")
+					TEXT("control recap map. Booting normally."), *RawMode);
+
+				State.bModeSpecified = false;
+			}
+		}
+		else if (FParse::Param(CmdLine, TEXT("IR")))
+		{
+			State.Mode = ERecordingBootMode::ControlRecap;
+			State.bModeSpecified = true;
+		}
+
+		// -ControlRecap, bare or valued. FParse::Param only matches the bare switch, so the valued
+		// form needs the token walk - and the long name is distinctive enough that it could have used
+		// FParse::Value, but there is no reason for the two flags to parse differently.
+		State.bControlRecapSwitch = FParse::Param(CmdLine, TEXT("ControlRecap"));
+
+		FString RequestedFolder;
+		if (FindSwitchValue(CmdLine, TEXT("ControlRecap"), RequestedFolder))
+		{
+			State.bControlRecapSwitch = true;
+
+			if (!RequestedFolder.IsEmpty())
+			{
+				// Accept a bare index so "-ControlRecap=5" does the obvious thing.
+				State.RequestedFolder = (FRecordingSessionInfo::ParseFolderName(RequestedFolder) == INDEX_NONE && RequestedFolder.IsNumeric())
+					? FRecordingSessionInfo::MakeFolderName(FCString::Atoi(*RequestedFolder))
+					: RequestedFolder;
+			}
+		}
+
+		return State;
+	}
+
+	const FBootFlagState& GetBootFlagState()
+	{
+		// The command line cannot change after startup, and every caller here runs long after
+		// FCommandLine is set, so one parse is enough.
+		static const FBootFlagState State = ParseBootFlags();
+		return State;
+	}
+}
+
+ERecordingBootMode RecordingBootFlags::GetBootMode()
+{
+	return GetBootFlagState().Mode;
+}
+
+bool RecordingBootFlags::WasBootModeSpecified()
+{
+	return GetBootFlagState().bModeSpecified;
 }
 
 bool RecordingBootFlags::IsControlRecapRequested()
 {
-	// Both spellings: -ControlRecap on its own, and -ControlRecap=Recording_5. FParse::Param only
-	// matches the bare switch, so the valued form needs its own check.
-	if (FParse::Param(FCommandLine::Get(), TEXT("ControlRecap")))
+	const FBootFlagState& State = GetBootFlagState();
+
+	// An explicit -IR=0 is the one thing that can veto -ControlRecap: it is how a launcher that
+	// appends -IR=<n> to a fixed shortcut turns review mode back off without editing the shortcut.
+	if (State.bModeSpecified && State.Mode == ERecordingBootMode::Normal)
 	{
-		return true;
+		return false;
 	}
 
-	FString Unused;
-	return FParse::Value(FCommandLine::Get(), TEXT("ControlRecap="), Unused);
+	return State.Mode == ERecordingBootMode::ControlRecap || State.bControlRecapSwitch;
 }
 
 FString RecordingBootFlags::GetRequestedSessionFolder()
 {
-	FString Requested;
-	if (!FParse::Value(FCommandLine::Get(), TEXT("ControlRecap="), Requested) || Requested.IsEmpty())
+	return GetBootFlagState().RequestedFolder;
+}
+
+bool RecordingBootFlags::ShouldForceMostRecentSession()
+{
+	const FBootFlagState& State = GetBootFlagState();
+
+	// Only the short flag forces. -ControlRecap on its own already falls through to "most recent" as
+	// its last resort, but it lets a level pin a take first; -IR=1 is the terminal-driven "show me
+	// what I just recorded" path, and a pinned level would defeat the entire point of it.
+	return State.Mode == ERecordingBootMode::ControlRecap
+		&& State.bModeSpecified
+		&& State.RequestedFolder.IsEmpty();
+}
+
+FString RecordingBootFlags::DescribeBootFlags()
+{
+	const FBootFlagState& State = GetBootFlagState();
+
+	if (!IsControlRecapRequested())
 	{
-		return FString();
+		return State.bModeSpecified
+			? TEXT("-IR=0: booting the gameplay map.")
+			: TEXT("No boot flags: booting the gameplay map.");
 	}
 
-	Requested.TrimStartAndEndInline();
+	const TCHAR* Flag = State.bModeSpecified ? TEXT("-IR=1") : TEXT("-ControlRecap");
 
-	// Accept a bare index so "-ControlRecap=5" does the obvious thing.
-	if (FRecordingSessionInfo::ParseFolderName(Requested) == INDEX_NONE && Requested.IsNumeric())
-	{
-		return FRecordingSessionInfo::MakeFolderName(FCString::Atoi(*Requested));
-	}
-
-	return Requested;
+	return State.RequestedFolder.IsEmpty()
+		? FString::Printf(TEXT("%s: reviewing the most recent session."), Flag)
+		: FString::Printf(TEXT("%s: reviewing '%s'."), Flag, *State.RequestedFolder);
 }
 
 void RecordingBootFlags::ApplyStartupMapOverride()
@@ -67,8 +208,9 @@ void RecordingBootFlags::ApplyStartupMapOverride()
 	if (!Settings || Settings->ControlRecapMap.IsNull())
 	{
 		UE_LOG(LogRecordingStore, Error,
-			TEXT("-ControlRecap was passed but no Control Recap Map is set in ")
-			TEXT("Project Settings > Game > Input Recording. Booting normally instead."));
+			TEXT("%s was passed but no Control Recap Map is set in ")
+			TEXT("Project Settings > Game > Input Recording. Booting normally instead."),
+			WasBootModeSpecified() ? TEXT("-IR=1") : TEXT("-ControlRecap"));
 		return;
 	}
 
@@ -83,10 +225,7 @@ void RecordingBootFlags::ApplyStartupMapOverride()
 
 	UGameMapsSettings::SetGameDefaultMap(MapPath);
 
-	const FString RequestedSession = GetRequestedSessionFolder();
-	UE_LOG(LogRecordingStore, Log, TEXT("-ControlRecap: booting into '%s', loading %s."),
-		*MapPath,
-		RequestedSession.IsEmpty() ? TEXT("the most recently updated session") : *RequestedSession);
+	UE_LOG(LogRecordingStore, Log, TEXT("Booting into '%s'. %s"), *MapPath, *DescribeBootFlags());
 
 	// The override above is the mechanism that should work. This only matters if module startup ran
 	// after the engine had already resolved its startup map.
@@ -125,8 +264,7 @@ void RecordingBootFlags::RegisterFallbackTravel()
 		}
 
 		UE_LOG(LogRecordingStore, Warning,
-			TEXT("-ControlRecap: the startup map override missed its window and '%s' loaded instead. ")
-			TEXT("Travelling to '%s' now."),
+			TEXT("Boot override missed its window and '%s' loaded instead. Travelling to '%s' now."),
 			*LoadedWorld->GetMapName(), *TargetName);
 
 		UGameplayStatics::OpenLevelBySoftObjectPtr(LoadedWorld, TSoftObjectPtr<UWorld>(Settings->ControlRecapMap));
