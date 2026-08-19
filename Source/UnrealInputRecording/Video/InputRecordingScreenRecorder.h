@@ -52,6 +52,18 @@ public:
 	 */
 	bool RenameCapturedVideo(const FString& NewRecordingName);
 
+	/**
+	 * Ask the next capture to write its first frame out as a PNG beside the .mp4.
+	 *
+	 * The orientation harness. Cleared as soon as a capture consumes it, so it never affects more than
+	 * one take and cannot be left on by accident.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|Video")
+	void RequestFrameDump() { bDumpNextFrame = true; }
+
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Video")
+	bool IsFrameDumpPending() const { return bDumpNextFrame; }
+
 	UFUNCTION(BlueprintPure, Category = "Input Recording|Video")
 	bool IsCapturing() const { return State == EInputRecordingVideoState::Recording; }
 
@@ -110,4 +122,7 @@ private:
 	FString CurrentRecordingName;
 	FString LastError;
 	FIntPoint CaptureResolution = FIntPoint::ZeroValue;
+
+	/** One-shot, consumed by the next StartCapture. See RequestFrameDump. */
+	bool bDumpNextFrame = false;
 };

@@ -150,12 +150,26 @@ void UInputReplayComponent::BuildActionRegistry()
 	TrackedActions.Reset();
 	TrackedActionIsDelta.Reset();
 
-	auto AddAction = [this](const UInputAction* Action)
+	// Whitelist membership is tested by pointer, so an entry that fails to load simply never matches
+	// rather than silently widening the filter.
+	const bool bUseWhitelist = (RecordingFilterMode == EInputRecordingFilterMode::WhitelistOnly);
+
+	int32 FilteredOutCount = 0;
+
+	auto AddAction = [this, bUseWhitelist, &FilteredOutCount](const UInputAction* Action)
 	{
-		if (Action && !TrackedActions.Contains(Action))
+		if (!Action || TrackedActions.Contains(Action))
 		{
-			TrackedActions.Add(Action);
+			return;
 		}
+
+		if (bUseWhitelist && !RecordedActionWhitelist.Contains(const_cast<UInputAction*>(Action)))
+		{
+			++FilteredOutCount;
+			return;
+		}
+
+		TrackedActions.Add(Action);
 	};
 
 	for (const UInputMappingContext* Context : RecordedContexts)
@@ -186,7 +200,25 @@ void UInputReplayComponent::BuildActionRegistry()
 	PlaybackStates.Reset();
 	PlaybackStates.SetNum(TrackedActions.Num());
 
-	UE_LOG(LogInputReplay, Log, TEXT("Tracking %d input action(s)."), TrackedActions.Num());
+	if (bUseWhitelist)
+	{
+		UE_LOG(LogInputReplay, Log,
+			TEXT("Tracking %d input action(s); %d filtered out by the whitelist."),
+			TrackedActions.Num(), FilteredOutCount);
+
+		// An empty result here is almost always a misconfigured whitelist rather than an intentional
+		// "record nothing", and it fails much later and much less obviously if left unsaid.
+		if (TrackedActions.Num() == 0 && FilteredOutCount > 0)
+		{
+			UE_LOG(LogInputReplay, Warning,
+				TEXT("The whitelist excluded every reachable action, so this recording would be empty. ")
+				TEXT("Check that Recorded Action Whitelist names actions the recorded contexts map."));
+		}
+	}
+	else
+	{
+		UE_LOG(LogInputReplay, Log, TEXT("Tracking %d input action(s)."), TrackedActions.Num());
+	}
 }
 
 bool UInputReplayComponent::ResolveActionRegistry(FString& OutError)

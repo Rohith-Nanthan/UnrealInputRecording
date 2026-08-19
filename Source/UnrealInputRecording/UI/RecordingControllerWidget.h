@@ -2,17 +2,23 @@
 //
 // RecordingControllerWidget.h
 //
-// The always-on control panel: a Start/Stop record toggle, a Test button, a "current input" read-out,
-// and a scrolling sync-point history. Built entirely in C++ (RebuildWidget); a Blueprint subclass
-// restyles through the Style properties and can reach the built panels from OnControllerConstructed.
+// The recording control panel: a Start/Stop toggle, a Test button, a "current input" read-out, and a
+// scrolling sync-point history. Built entirely in C++ (RebuildWidget); a Blueprint subclass restyles
+// through the Style properties and can reach the built panels from OnControllerConstructed.
+//
+// A POP-UP, NOT A HUD ELEMENT
+//   The subsystem owns this widget and raises it from StartRecording, whichever route that came in by
+//   - console command, gameplay code, or the button on this panel. StopRecording takes it away and
+//   replaces it with the save confirmation. It is pinned to the bottom-right corner and capped at a
+//   share of the screen area so it never becomes the thing the player is looking at.
 //
 // Data sources (all on UInputRecordingSubsystem):
 //   Current input   - GetLiveInputSnapshot(), polled each tick.
 //   Sync history    - OnInputSyncPointRecorded, one row appended per onset. The last few rows stay
 //                     bright (HistoryHighlightCount) while older ones fade, and the list auto-scrolls
 //                     to the newest.
-//   Test            - StartMatchInputMode() + a UMatchVideoPlayerWidget pushed full-screen. The
-//                     controller hides while the player is up and shows again when it closes.
+//   Test            - RunControlRecapTest(), which saves the take and travels to ControlRecapLevel.
+//                     This widget does not survive that travel, and does not need to.
 
 #pragma once
 
@@ -24,12 +30,12 @@
 
 class UBorder;
 class UButton;
+class UCanvasPanel;
 class UImage;
 class UInputActionIconMappingDataAsset;
 class UInputRecordingSubsystem;
-class UMatchCueMarkerWidget;
-class UMatchVideoPlayerWidget;
 class UScrollBox;
+class USizeBox;
 class USyncPointRowWidget;
 class UTextBlock;
 class UVerticalBox;
@@ -57,14 +63,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	TObjectPtr<UInputActionIconMappingDataAsset> IconMapping;
 
-	/** Full-screen player spawned by Test. Defaults to UMatchVideoPlayerWidget. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
-	TSubclassOf<UMatchVideoPlayerWidget> MatchPlayerClass;
-
-	/** Passed through to the spawned player for its timeline markers. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
-	TSubclassOf<UMatchCueMarkerWidget> CueMarkerClass;
-
 	/** Row widget for the history list. Defaults to USyncPointRowWidget. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	TSubclassOf<USyncPointRowWidget> SyncRowClass;
@@ -80,8 +78,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	bool bManagePlayerInputMode = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
-	int32 MatchPlayerZOrder = 1000;
+	//~ Screen footprint --------------------------------------------------------------------------
+
+	/**
+	 * Largest share of the screen *area* the panel may occupy.
+	 *
+	 * Area rather than a width and a height, because those two constraints disagree at unusual aspect
+	 * ratios: 26% wide by 46% tall is a reasonable 12% on a 16:9 display and a very different thing on
+	 * an ultrawide. The panel is laid out from MaxWidthFraction and MaxHeightFraction, then scaled down
+	 * uniformly if their product would exceed this.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout", meta = (ClampMin = "0.05", ClampMax = "0.5"))
+	float MaxScreenAreaFraction = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+	float MaxWidthFraction = 0.26f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+	float MaxHeightFraction = 0.46f;
+
+	/** Gap between the panel and the bottom-right corner of the viewport. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout")
+	FVector2D CornerMargin = FVector2D(24.0, 24.0);
 
 	//~ Style hooks -------------------------------------------------------------------------------
 
@@ -145,7 +163,9 @@ private:
 	UFUNCTION() void HandleSyncPointRecorded(FName ActionName, float TimeSeconds, FVector Value);
 	UFUNCTION() void HandleRecordClicked();
 	UFUNCTION() void HandleTestClicked();
-	UFUNCTION() void HandlePlayerClosed(bool bCompletedAllCues);
+
+	/** Applies MaxScreenAreaFraction to ClampBox from the current viewport size. Called each tick. */
+	void ApplyScreenClamp(const FGeometry& MyGeometry);
 
 	/** Re-applies the last-N highlight window after a row is added. */
 	void UpdateHistoryHighlights();
@@ -164,7 +184,9 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> HistoryCountBadge;
 
 	UPROPERTY(Transient) TArray<TObjectPtr<USyncPointRowWidget>> HistoryRows;
-	UPROPERTY(Transient) TObjectPtr<UMatchVideoPlayerWidget> ActiveMatchPlayer;
+
+	/** Wraps the panel and caps its size. Between the root canvas and RootBorder. */
+	UPROPERTY(Transient) TObjectPtr<USizeBox> ClampBox;
 
 	int32 SyncPointCount = 0;
 	float RecordStartWorldTime = 0.f;

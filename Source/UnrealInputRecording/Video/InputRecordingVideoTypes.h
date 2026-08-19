@@ -28,6 +28,20 @@ DECLARE_LOG_CATEGORY_EXTERN(LogInputRecordingVideo, Log, All);
 namespace InputRecordingVideo
 {
 	inline const TCHAR* VideoExtension = TEXT(".mp4");
+
+	/**
+	 * Writes one BGRA8 frame to a PNG, exactly as the encoder received it.
+	 *
+	 * The orientation harness behind ir.video.dumpframe. PNG rather than BMP on purpose: BMP's own
+	 * row order is bottom-up by convention, so dumping to one would reproduce the very ambiguity this
+	 * is meant to resolve. If the PNG is upright, the encoder is being fed an upright frame and any
+	 * inversion in the .mp4 came from the encoder; if the PNG is inverted, the capture side is at
+	 * fault. Blocking, and expected to be called at most once per take from a worker thread.
+	 *
+	 * @param Bgra    Tightly packed rows, Width * 4 bytes each.
+	 * @param PngPath Absolute destination. Parent directory must already exist.
+	 */
+	UNREALINPUTRECORDING_API void DumpBgraFrameToPng(const uint8* Bgra, int32 Width, int32 Height, const FString& PngPath);
 }
 
 /** What the screen recorder is doing. Mirrors EMediaCaptureState but without the MediaIO dependency. */
@@ -38,6 +52,26 @@ enum class EInputRecordingVideoState : uint8
 	Starting	UMETA(DisplayName = "Starting"),
 	Recording	UMETA(DisplayName = "Recording"),
 	Failed		UMETA(DisplayName = "Failed")
+};
+
+/**
+ * Row order handed to the encoder.
+ *
+ * Named rather than boolean because "flip" only means something once you know what it is flipping
+ * from, and every bug in this area has come from two pieces of code each assuming the other's
+ * convention. See FInputRecordingVideoOptions::Orientation.
+ */
+UENUM(BlueprintType)
+enum class EInputRecordingCaptureOrientation : uint8
+{
+	/** Whatever the platform backend considers native. On Windows this is a straight row-for-row copy. */
+	Auto		UMETA(DisplayName = "Auto"),
+
+	/** Row 0 of the encoder's buffer is the top of the image. */
+	TopDown		UMETA(DisplayName = "Top-down"),
+
+	/** Row 0 of the encoder's buffer is the bottom of the image - the legacy RGB DIB convention. */
+	BottomUp	UMETA(DisplayName = "Bottom-up")
 };
 
 /**
@@ -64,15 +98,16 @@ struct FInputRecordingVideoOptions
 	int32 BitRateKbps = 12000;
 
 	/**
-	 * Scale applied to the viewport resolution before capture. 1.0 records at native resolution;
-	 * 0.5 quarters the pixel count, which is the cheapest way to stop capture costing frames on a
-	 * 4K display. The result is always snapped down to an even number of pixels - H.264 macroblocks
-	 * require it and the encoder will refuse an odd dimension outright.
+	 * Capture is always at the viewport's native resolution - there is deliberately no scale factor.
+	 *
+	 * A downscale is the cheapest way to buy back frame time on a high-resolution display, but it
+	 * also quietly changes what the recording is evidence *of*, and a control recap is meant to show
+	 * the game as it actually looked. Cost is managed with BitRateKbps instead, which trades file
+	 * size without touching the picture. The size is snapped down to even on both axes because H.264
+	 * macroblocks require it and the encoder refuses an odd dimension outright.
+	 *
+	 * Ignore the viewport entirely and pin the output size with the two properties below.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Video", meta = (ClampMin = "0.1", ClampMax = "1.0"))
-	float ResolutionScale = 1.0f;
-
-	/** Ignore the viewport size and always capture at ForcedResolution. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Video", meta = (InlineEditConditionToggle))
 	bool bOverrideResolution = false;
 
@@ -90,11 +125,21 @@ struct FInputRecordingVideoOptions
 	int32 MaxQueuedFrames = 6;
 
 	/**
-	 * Flip the captured image vertically before encoding. Leave off - the stock pipeline is already
-	 * upright. Only flip if a machine's H.264 encoder reads bottom-up and the .mp4 comes out inverted.
+	 * Which way up the encoder is fed.
+	 *
+	 * This exists as an explicit setting rather than a hidden constant because the two halves of the
+	 * pipeline disagree about the convention and neither one announces it: UMediaCapture's CPU
+	 * readback hands over the viewport top-down, while Media Foundation's uncompressed RGB surfaces
+	 * follow the legacy DIB convention where the first row in memory is the *bottom* of the image.
+	 * Whether that mismatch actually inverts the file depends on which conversion the sink writer
+	 * inserts between RGB32 and the encoder's native format, and that varies by machine.
+	 *
+	 * Auto is what the current pipeline does today. If a capture comes out inverted, set BottomUp -
+	 * the flip costs nothing, since the frame is already being copied row by row. Confirm which way
+	 * is correct with ir.video.dumpframe rather than by re-encoding and eyeballing a video player.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Video", AdvancedDisplay)
-	bool bFlipVerticallyOnCapture = false;
+	EInputRecordingCaptureOrientation Orientation = EInputRecordingCaptureOrientation::Auto;
 };
 
 /** Path helpers. Kept in a library so Blueprint tooling can resolve the same paths C++ does. */

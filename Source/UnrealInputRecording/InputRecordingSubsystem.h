@@ -24,6 +24,7 @@
 #include "InputReplay/InputMatchCue.h"
 #include "InputReplay/InputReplayComponent.h"
 #include "InputReplay/InputReplayTypes.h"
+#include "Storage/RecordingSessionTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 
 #include "InputRecordingSubsystem.generated.h"
@@ -32,6 +33,9 @@ class APlayerController;
 class UInputRecordingDataAsset;
 class UInputRecordingScreenRecorder;
 class UInputRecordingVideoPlayer;
+class URecordingControllerWidget;
+class URecordingStore;
+class URecordingToastWidget;
 
 /** Fired whenever the underlying component changes mode. Drives button enable/disable in the UI. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInputRecordingModeChanged, EInputReplayMode, NewMode);
@@ -41,6 +45,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInputRecordingVideoSaved, bool, 
 
 /** Relayed from the component: an action crossed its onset threshold while recording. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInputRecordingSyncPoint, FName, ActionName, float, TimeSeconds, FVector, Value);
+
+/**
+ * A take finished and its session is committed. SessionPath is the folder, which is what the
+ * "recording successful, saved to ..." message shows.
+ *
+ * bQuotaStopped is true when the take ended because the store filled up rather than because someone
+ * pressed stop - the recording is still valid and still saved, it is just shorter than intended.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInputRecordingSaved, bool, bSuccess, const FString&, SessionPath, bool, bQuotaStopped);
 
 UCLASS()
 class UNREALINPUTRECORDING_API UInputRecordingSubsystem : public UGameInstanceSubsystem
@@ -99,6 +112,84 @@ public:
 	/** Stop capturing and keep the result in memory only. */
 	UFUNCTION(BlueprintCallable, Category = "Input Recording")
 	void StopRecordingWithoutSaving();
+
+	/**
+	 * Abandon the current take and delete its session folder.
+	 *
+	 * Distinct from StopRecordingWithoutSaving, which leaves the recording in memory and the folder
+	 * on disk. This is the "I fluffed that, throw it away" path, and it reclaims the quota.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording")
+	void CancelRecording();
+
+	/**
+	 * Stop and save the current take, then open the control recap map for it.
+	 *
+	 * What the Test button and ir.record.test both call. Safe to call when nothing is recording: it
+	 * just opens the recap map on the most recent session.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording")
+	void RunControlRecapTest();
+
+	// -----------------------------------------------------------------------------------------
+	// Storage
+	// -----------------------------------------------------------------------------------------
+
+	/** The session store. Created and scanned during Initialize, so this is never null after startup. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Storage")
+	URecordingStore* GetRecordingStore() const { return SessionStore; }
+
+	/** The session currently being written, or an invalid one when nothing is recording. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Storage")
+	const FRecordingSessionInfo& GetActiveSession() const { return ActiveSession; }
+
+	/** Folder of the most recently committed take. What the save confirmation shows. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Storage")
+	FString GetLastSavedSessionPath() const { return LastSavedSessionPath; }
+
+	/** Loads a session and starts MatchInput against it. Touches the session so LRU protects it. */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|Match Input")
+	bool StartMatchInputFromSession(const FRecordingSessionInfo& Session);
+
+	// -----------------------------------------------------------------------------------------
+	// UI ownership
+	// -----------------------------------------------------------------------------------------
+
+	/**
+	 * Show the recording controller overlay, creating it if needed.
+	 *
+	 * The subsystem owns this widget rather than the level or the HUD because StartRecording can be
+	 * called from anywhere - console, gameplay code, another widget - and all of those have to raise
+	 * the same panel. A widget owned by a level would also die on travel, which is precisely when a
+	 * recording most wants to keep going.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|UI")
+	void ShowRecordingController();
+
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|UI")
+	void HideRecordingController();
+
+	UFUNCTION(BlueprintPure, Category = "Input Recording|UI")
+	bool IsRecordingControllerVisible() const;
+
+	/** Puts a message on screen. Real UMG, so it survives into shipping builds where debug text does not. */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|UI")
+	void ShowToast(const FString& Message, float DurationSeconds = 4.f);
+
+	/** Overlay class. A Blueprint subclass set here restyles the panel without touching C++. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")
+	TSoftClassPtr<URecordingControllerWidget> ControllerWidgetClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")
+	TSoftClassPtr<URecordingToastWidget> ToastWidgetClass;
+
+	/** Z order for the overlay. High enough to sit above a typical gameplay HUD. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")
+	int32 RecordingControllerZOrder = 1000;
+
+	/** Ask the next capture to dump its first frame as a PNG. See ir.video.dumpframe. */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|Video")
+	void RequestVideoFrameDump();
 
 	// -----------------------------------------------------------------------------------------
 	// MatchInput - interactive playback
@@ -282,6 +373,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
 	FOnInputRecordingVideoSaved OnVideoSaved;
 
+	/** A take committed to disk. Carries the session folder for the save confirmation. */
+	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
+	FOnInputRecordingSaved OnRecordingSaved;
+
 	/** Fired for every sync point captured while recording. The controller UI appends a history row. */
 	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
 	FOnInputRecordingSyncPoint OnInputSyncPointRecorded;
@@ -354,6 +449,33 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UInputRecordingVideoPlayer> VideoPlayer;
+
+	UPROPERTY(Transient)
+	TObjectPtr<URecordingStore> SessionStore;
+
+	UPROPERTY(Transient)
+	TObjectPtr<URecordingControllerWidget> ControllerWidget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<URecordingToastWidget> ToastWidget;
+
+	/** The take in progress. Invalid whenever nothing is recording. */
+	FRecordingSessionInfo ActiveSession;
+
+	FString LastSavedSessionPath;
+
+	/**
+	 * Accumulator for the quota poll, which shares the video sync ticker rather than adding a second
+	 * one. Checking every frame would stat the disk 60 times a second for no benefit; once a second
+	 * is well inside the margin the per-take reservation buys.
+	 */
+	float QuotaPollAccumulator = 0.f;
+
+	/** True when the current take was cut short by the quota rather than by a stop request. */
+	bool bActiveTakeStoppedByQuota = false;
+
+	/** Polls the store during a take and stops recording the moment the quota is reached. */
+	void TickQuotaGuard(float DeltaSeconds);
 
 	FTSTicker::FDelegateHandle VideoSyncTickerHandle;
 

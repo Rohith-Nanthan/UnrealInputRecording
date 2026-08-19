@@ -35,9 +35,10 @@ namespace
 	/**
 	 * One frame in flight between the render thread and the encoder thread.
 	 *
-	 * Pixels are stored top-down (row 0 = top), exactly as UMediaCapture delivers them. The H.264
-	 * encoder MFT reads MFVideoFormat_RGB32 top-down with a positive MF_MT_DEFAULT_STRIDE, so no flip
-	 * is needed; FInputRecordingVideoEncoderConfig::bFlipVertical exists only as an escape hatch.
+	 * Pixels are stored tightly packed at FrameStride, in whichever row order
+	 * FInputRecordingVideoEncoderConfig::bFlipVertical resolved to. Readback padding is already gone
+	 * by this point - SubmitFrame_AnyThread copies row by row precisely so it can strip that padding
+	 * and apply the row order in the same pass.
 	 */
 	struct FEncoderFrame
 	{
@@ -92,6 +93,8 @@ public:
 
 		FrameStride = Config.Width * 4;
 		FrameBytes  = FrameStride * Config.Height;
+
+		bDumpPending.store(Config.bDumpFirstFrame, std::memory_order_release);
 
 		InitCompleteEvent = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/true);
 		WorkAvailableEvent = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/false);
@@ -164,10 +167,15 @@ public:
 		const int32 EffectiveStride = (SourceStride > 0) ? SourceStride : FrameStride;
 		uint8* Dest = Frame->Pixels.GetData();
 
-		// Orientation: UMediaCapture hands us the viewport top-down (row 0 = top) and the H.264 encoder
-		// MFT consumes MFVideoFormat_RGB32 top-down too, so a straight row-for-row copy is correct. The
-		// previous build flipped here AND declared a positive stride - a double inversion that shipped the
-		// video upside down. bFlipVertical re-enables a flip only for an encoder that reads bottom-up.
+		// Orientation. UMediaCapture hands us the viewport top-down (row 0 = top). What Media Foundation
+		// does with that depends on the conversion the sink writer inserts between RGB32 and the
+		// encoder's native format, and MF's uncompressed RGB surfaces follow the legacy DIB convention
+		// where row 0 is the *bottom*. Whether those two cancel out is a runtime property of the
+		// machine, not something this file can assert - so the decision is lifted out to
+		// FInputRecordingVideoOptions::Orientation and resolved before it reaches here.
+		//
+		// Do not "fix" this by reasoning about the convention. Run ir.video.dumpframe, look at the PNG,
+		// and set Orientation to match what you actually see.
 		for (int32 Row = 0; Row < SourceHeight; ++Row)
 		{
 			const int32 DestRow = Config.bFlipVertical ? (SourceHeight - 1 - Row) : Row;
@@ -332,7 +340,10 @@ private:
 		// MFVideoFormat_RGB32 is B,G,R,X in memory, which is exactly PF_B8G8R8A8 - no swizzle needed.
 		InputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
 		InputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-		// Positive stride = top-down, matching how we fill the buffer (see the copy loop in SubmitFrame).
+		// Positive, tightly packed stride. This describes the buffer's *packing*, not its row order -
+		// row order is decided by the copy loop in SubmitFrame and configured through
+		// FInputRecordingVideoOptions::Orientation. Keeping the stride positive and unconditional means
+		// there is only ever one variable in play when orientation is wrong.
 		InputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(FrameStride));
 		::MFSetAttributeSize(InputType, MF_MT_FRAME_SIZE, Config.Width, Config.Height);
 		::MFSetAttributeRatio(InputType, MF_MT_FRAME_RATE, Config.FrameRate, 1);
@@ -393,6 +404,16 @@ private:
 
 	void WriteFrame(const FEncoderFrame& Frame)
 	{
+		// One-shot orientation harness. Deliberately on the encoder thread rather than the render
+		// thread: PNG compression of a 1080p frame is milliseconds, which is nothing here and a visible
+		// hitch there. These are the exact bytes that go into the sample below, post-flip.
+		if (bDumpPending.exchange(false, std::memory_order_acq_rel))
+		{
+			InputRecordingVideo::DumpBgraFrameToPng(
+				Frame.Pixels.GetData(), Frame.Width, Frame.Height,
+				FPaths::ChangeExtension(Config.OutputPath, TEXT("png")));
+		}
+
 		TComPtr<IMFMediaBuffer> Buffer;
 		HRESULT Result = ::MFCreateMemoryBuffer(static_cast<DWORD>(FrameBytes), &Buffer);
 		if (FAILED(Result))
@@ -584,6 +605,9 @@ private:
 	std::atomic<bool> bInitialised{ false };
 	std::atomic<bool> bStopRequested{ false };
 	std::atomic<bool> bFailed{ false };
+
+	/** Seeded from Config.bDumpFirstFrame; cleared by the first frame that honours it. */
+	std::atomic<bool> bDumpPending{ false };
 
 	std::atomic<int64> SubmittedFrames{ 0 };
 	std::atomic<int64> EncodedFrames{ 0 };

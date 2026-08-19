@@ -102,7 +102,23 @@ bool UInputRecordingMediaCapture::InitializeCapture()
 	Config.FrameRate       = FMath::Max(1, Output->EncoderOptions.TargetFrameRate);
 	Config.BitRate         = FMath::Max(1, Output->EncoderOptions.BitRateKbps) * 1000;
 	Config.MaxQueuedFrames = FMath::Max(1, Output->EncoderOptions.MaxQueuedFrames);
-	Config.bFlipVertical   = Output->EncoderOptions.bFlipVerticallyOnCapture;
+	Config.bDumpFirstFrame = Output->bDumpFirstFrame;
+
+	// Resolve the orientation policy to a plain bool here, so the platform backend never has to know
+	// what Auto means. Auto is "whatever this pipeline already did", which on the Media Foundation
+	// path is a straight row-for-row copy - see the copy loop in VideoEncoderBackend.cpp.
+	switch (Output->EncoderOptions.Orientation)
+	{
+	case EInputRecordingCaptureOrientation::BottomUp:
+		Config.bFlipVertical = true;
+		break;
+
+	case EInputRecordingCaptureOrientation::TopDown:
+	case EInputRecordingCaptureOrientation::Auto:
+	default:
+		Config.bFlipVertical = false;
+		break;
+	}
 
 	TUniquePtr<IInputRecordingVideoEncoder> NewEncoder = IInputRecordingVideoEncoder::Create();
 	if (!NewEncoder.IsValid())

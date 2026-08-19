@@ -5,6 +5,7 @@
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "InputReplay/InputReplayComponent.h"
+#include "Storage/RecordingSessionTypes.h"
 
 UInputRecordingSettings::UInputRecordingSettings()
 {
@@ -18,6 +19,16 @@ const UInputRecordingSettings* UInputRecordingSettings::Get()
 	// GetDefault is the correct accessor for a UDeveloperSettings CDO - it is where the ini values
 	// are loaded into.
 	return GetDefault<UInputRecordingSettings>();
+}
+
+int64 UInputRecordingSettings::GetQuotaBytes() const
+{
+	return static_cast<int64>(QuotaMegabytes) * RecordingStore::BytesPerMegabyte;
+}
+
+int64 UInputRecordingSettings::GetReserveBytesPerTake() const
+{
+	return static_cast<int64>(ReserveMegabytesPerTake) * RecordingStore::BytesPerMegabyte;
 }
 
 void UInputRecordingSettings::ApplyDefaultsTo(UInputReplayComponent* Component, bool bForce) const
@@ -81,6 +92,37 @@ void UInputRecordingSettings::ApplyDefaultsTo(UInputReplayComponent* Component, 
 			{
 				Component->FrameDeltaActions.Add(Action);
 			}
+		}
+	}
+
+	// ---- Recording filter --------------------------------------------------------------------
+	// A component left at RecordAll is at its default and has not been configured by hand, so the
+	// project setting is free to fill it in. One that already says WhitelistOnly was set deliberately
+	// and keeps its own list.
+	if (bForce || Component->RecordingFilterMode == EInputRecordingFilterMode::RecordAll)
+	{
+		Component->RecordingFilterMode = RecordingFilterMode;
+
+		if (RecordingFilterMode == EInputRecordingFilterMode::WhitelistOnly)
+		{
+			TArray<TObjectPtr<UInputAction>> Resolved;
+			for (const TSoftObjectPtr<UInputAction>& Soft : RecordedActionWhitelist)
+			{
+				if (UInputAction* Action = Soft.LoadSynchronous())
+				{
+					Resolved.Add(Action);
+				}
+				else if (!Soft.IsNull())
+				{
+					// Silently dropping a whitelist entry would look identical to the action simply not
+					// firing, which is a miserable thing to debug during a take.
+					UE_LOG(LogInputReplay, Warning,
+						TEXT("Recording whitelist references an action that will not load: %s"),
+						*Soft.ToString());
+				}
+			}
+
+			Component->RecordedActionWhitelist = MoveTemp(Resolved);
 		}
 	}
 

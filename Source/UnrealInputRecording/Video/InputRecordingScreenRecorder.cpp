@@ -31,15 +31,14 @@ FIntPoint UInputRecordingScreenRecorder::ResolveCaptureResolution(UObject* World
 
 	if (!Options.bOverrideResolution)
 	{
+		// Native viewport resolution, 1:1, no scale factor. See FInputRecordingVideoOptions for why
+		// there is no downscale knob here any more.
 		Size = FIntPoint(1920, 1080);
 
 		if (GEngine && GEngine->GameViewport && GEngine->GameViewport->Viewport)
 		{
 			Size = GEngine->GameViewport->Viewport->GetSizeXY();
 		}
-
-		Size.X = FMath::RoundToInt(Size.X * Options.ResolutionScale);
-		Size.Y = FMath::RoundToInt(Size.Y * Options.ResolutionScale);
 	}
 
 	// H.264 chroma is subsampled 2x2, so both axes have to be even. Rounding down rather than up keeps
@@ -88,6 +87,11 @@ bool UInputRecordingScreenRecorder::StartCapture(UObject* WorldContext, const FS
 	MediaOutput->OutputFilePath = OutputPath;
 	MediaOutput->Resolution = CaptureResolution;
 	MediaOutput->EncoderOptions = Options;
+
+	// Consumed here, not when the frame is written, so a dump request can never survive into a second
+	// take if this capture fails to start.
+	MediaOutput->bDumpFirstFrame = bDumpNextFrame;
+	bDumpNextFrame = false;
 
 	FString ValidationError;
 	if (!MediaOutput->Validate(ValidationError))

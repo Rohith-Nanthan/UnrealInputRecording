@@ -44,7 +44,24 @@ public class UnrealInputRecording : ModuleRules
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] {
-			"Json", "JsonUtilities"
+			// Json/JsonUtilities - the .ghost.json companion format, and the recording store's
+			//                      Session.json / RecordingIndex.json manifests.
+			"Json", "JsonUtilities",
+
+			// ImageWrapper - InputRecordingVideo::DumpBgraFrameToPng, the orientation harness behind
+			//                ir.video.dumpframe. PNG specifically: it has one unambiguous row order,
+			//                which is the entire point of dumping a frame to look at.
+			"ImageWrapper",
+
+			// ApplicationCore - FPlatformApplicationMisc, used to resolve the viewport DPI scale when
+			//                   clamping the recording controller overlay to its share of the screen.
+			"ApplicationCore",
+
+			// EngineSettings - UGameMapsSettings::SetGameDefaultMap, which is how -ControlRecap boots
+			//                  straight into the recap map (Boot/RecordingBootFlags.cpp).
+			//                  A monolithic target links this implicitly; the modular editor DLL does
+			//                  not, so it has to be named here or only the editor build fails.
+			"EngineSettings"
 		});
 
 		if (Target.bBuildEditor)

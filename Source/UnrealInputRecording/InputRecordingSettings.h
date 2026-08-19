@@ -57,6 +57,20 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Recording")
 	TArray<TSoftObjectPtr<UInputAction>> FrameDeltaActions;
 
+	/**
+	 * Record everything the contexts reach, or only RecordedActionWhitelist.
+	 *
+	 * Pushed onto components the subsystem creates, and onto hand-configured ones only when they are
+	 * still at the default - see ApplyDefaultsTo.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Recording")
+	EInputRecordingFilterMode RecordingFilterMode = EInputRecordingFilterMode::RecordAll;
+
+	/** The only actions recorded when RecordingFilterMode is WhitelistOnly. */
+	UPROPERTY(config, EditAnywhere, Category = "Recording",
+		meta = (EditCondition = "RecordingFilterMode == EInputRecordingFilterMode::WhitelistOnly"))
+	TArray<TSoftObjectPtr<UInputAction>> RecordedActionWhitelist;
+
 	UPROPERTY(config, EditAnywhere, Category = "Recording")
 	EInputReplayTimeMode TimeMode = EInputReplayTimeMode::FixedLogicalStep;
 
@@ -116,6 +130,57 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Video")
 	FInputRecordingVideoOptions VideoOptions;
 
+	//~ Storage ---------------------------------------------------------------------------------
+
+	/**
+	 * Ceiling for the whole recording folder, in megabytes.
+	 *
+	 * Worth doing the arithmetic before changing this: at the default 12000 kbit/s and native capture
+	 * resolution, 900 MB is roughly ten minutes of video across every session combined. That is a
+	 * budget for the store, not for one take.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Storage", meta = (ClampMin = "50", ClampMax = "51200", DisplayName = "Quota (MB)"))
+	int32 QuotaMegabytes = 900;
+
+	/**
+	 * Headroom reserved before a take is allowed to start, in megabytes.
+	 *
+	 * The store evicts until this much is free, so a take begins knowing it has somewhere to go. It is
+	 * not a limit on the take: recording stops when the quota is actually reached, not when the
+	 * reservation is used up.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Storage", meta = (ClampMin = "16", ClampMax = "8192", DisplayName = "Reserve Per Take (MB)"))
+	int32 ReserveMegabytesPerTake = 150;
+
+	/**
+	 * Stop a take the moment the store reaches its quota.
+	 *
+	 * On by default and worth leaving on for console: the alternative is evicting other sessions
+	 * mid-write, which risks losing a finished take to protect an unfinished one. The take that gets
+	 * stopped is still saved - it is simply shorter than intended, and the toast says so.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Storage")
+	bool bStopRecordingWhenQuotaReached = true;
+
+	//~ Control Recap ---------------------------------------------------------------------------
+
+	/** The standalone review map. Booted into directly by -ControlRecap, and opened by the Test button. */
+	UPROPERTY(config, EditAnywhere, Category = "Control Recap", meta = (AllowedClasses = "/Script/Engine.World"))
+	FSoftObjectPath ControlRecapMap;
+
+	/**
+	 * Where Cancel goes from the control recap screen.
+	 *
+	 * Overridable per level by AControlRecapGameMode::TargetOnCancelMap; this is the fallback when the
+	 * game mode leaves it unset. Empty falls back to the project's own default map.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Control Recap", meta = (AllowedClasses = "/Script/Engine.World"))
+	FSoftObjectPath GameplayMap;
+
+	/** Mapping context pushed for UI navigation on both widgets. See URecordingUIInputConfig. */
+	UPROPERTY(config, EditAnywhere, Category = "Control Recap")
+	TSoftObjectPtr<class URecordingUIInputConfig> UIInputConfig;
+
 	//~ Subsystem -------------------------------------------------------------------------------
 
 	/**
@@ -134,6 +199,11 @@ public:
 	//~ API -------------------------------------------------------------------------------------
 
 	static const UInputRecordingSettings* Get();
+
+	/** QuotaMegabytes as bytes. The store works in bytes; the setting is in megabytes for humans. */
+	int64 GetQuotaBytes() const;
+
+	int64 GetReserveBytesPerTake() const;
 
 	/**
 	 * Pushes these defaults onto a component.

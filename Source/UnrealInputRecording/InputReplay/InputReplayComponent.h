@@ -150,6 +150,22 @@ public:
 	TArray<TObjectPtr<UInputAction>> AdditionalActions;
 
 	/**
+	 * Record everything the contexts reach, or only the whitelist below.
+	 *
+	 * Whitelist mode is subtractive on top of RecordedContexts and AdditionalActions rather than a
+	 * replacement for them - an action still has to be reachable to be recorded, and the whitelist
+	 * then narrows that set. That ordering means turning the filter on can never *add* an action you
+	 * did not already have configured.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Setup")
+	EInputRecordingFilterMode RecordingFilterMode = EInputRecordingFilterMode::RecordAll;
+
+	/** The only actions recorded when RecordingFilterMode is WhitelistOnly. Ignored otherwise. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Setup",
+		meta = (EditCondition = "RecordingFilterMode == EInputRecordingFilterMode::WhitelistOnly"))
+	TArray<TObjectPtr<UInputAction>> RecordedActionWhitelist;
+
+	/**
 	 * CRITICAL for look/aim fidelity. Actions listed here are treated as per-frame *deltas*
 	 * (mouse XY, trackpad, scroll wheel) rather than *rates* (gamepad stick, WASD).
 	 *

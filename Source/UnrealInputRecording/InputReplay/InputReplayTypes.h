@@ -34,6 +34,27 @@ namespace InputReplay
 	inline const TCHAR* RecordingSubDir = TEXT("InputRecordings");
 }
 
+/**
+ * Which actions end up in a recording.
+ *
+ * The filter is applied when the tracked-action list is built, not when samples are written, so a
+ * filtered-out action costs nothing at all during a take - it is never sampled, never stored in the
+ * header, and never produces a cue. That also means changing the filter mid-recording does nothing;
+ * it takes effect on the next StartRecording.
+ */
+UENUM(BlueprintType)
+enum class EInputRecordingFilterMode : uint8
+{
+	/** Everything reachable from the recorded contexts, plus AdditionalActions. */
+	RecordAll		UMETA(DisplayName = "Record all inputs"),
+
+	/**
+	 * Only actions named in the whitelist. Anything else is ignored even if a recorded context maps
+	 * it. Useful for a tutorial that should only ever ask the player for two or three inputs.
+	 */
+	WhitelistOnly	UMETA(DisplayName = "Record only whitelisted actions")
+};
+
 /** What the manager component is currently doing. */
 UENUM(BlueprintType)
 enum class EInputReplayMode : uint8

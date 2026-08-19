@@ -4,11 +4,14 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
 #include "Components/Button.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
 #include "Components/ScrollBox.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
@@ -18,7 +21,6 @@
 #include "InputRecordingSubsystem.h"
 #include "Styling/CoreStyle.h"
 #include "UI/InputActionIconMappingDataAsset.h"
-#include "UI/MatchVideoPlayerWidget.h"
 #include "UI/SyncPointRowWidget.h"
 
 namespace
@@ -100,6 +102,10 @@ void URecordingControllerWidget::BuildTree()
 
 		RecordToggleButton = WidgetTree->ConstructWidget<UButton>();
 		RecordToggleButton->SetBackgroundColor(DangerColor);
+
+		// UButton is focusable by default, so a gamepad can already reach both of these. Focus movement
+		// between them is Slate's navigation config, not Enhanced Input - see URecordingUIInputConfig
+		// for why that distinction matters.
 		RecordToggleButton->OnClicked.AddDynamic(this, &URecordingControllerWidget::HandleRecordClicked);
 		RecordButtonLabel = MakeText(WidgetTree, TEXT("Start recording"), 14, FLinearColor::White);
 		RecordButtonLabel->SetJustification(ETextJustify::Center);
@@ -197,7 +203,57 @@ void URecordingControllerWidget::BuildTree()
 		}
 	}
 
-	WidgetTree->RootWidget = RootBorder;
+	// The panel is pinned to the bottom-right corner and capped at a share of the screen, so it sits
+	// out of the way of whatever the player is actually doing. A canvas is the only panel that can
+	// anchor to a corner without stretching, and the size box between it and the border is what caps
+	// the footprint - see ApplyScreenClamp.
+	UCanvasPanel* RootCanvas = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
+
+	ClampBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("ClampBox"));
+	ClampBox->SetContent(RootBorder);
+
+	if (UCanvasPanelSlot* ClampSlot = RootCanvas->AddChildToCanvas(ClampBox))
+	{
+		ClampSlot->SetAnchors(FAnchors(1.f, 1.f));
+		ClampSlot->SetAlignment(FVector2D(1.0, 1.0));
+		ClampSlot->SetPosition(FVector2D(-CornerMargin.X, -CornerMargin.Y));
+		ClampSlot->SetAutoSize(true);
+	}
+
+	WidgetTree->RootWidget = RootCanvas;
+}
+
+void URecordingControllerWidget::ApplyScreenClamp(const FGeometry& MyGeometry)
+{
+	if (!ClampBox)
+	{
+		return;
+	}
+
+	const FVector2D ScreenSize = MyGeometry.GetLocalSize();
+	if (ScreenSize.X <= 0.f || ScreenSize.Y <= 0.f)
+	{
+		return;
+	}
+
+	float WidthFraction  = MaxWidthFraction;
+	float HeightFraction = MaxHeightFraction;
+
+	// Scale both axes by the same factor when the requested box would exceed the area budget. Shrinking
+	// only one axis would change the panel's proportions with the display's, which is exactly the
+	// behaviour the area cap exists to avoid.
+	const float RequestedArea = WidthFraction * HeightFraction;
+	if (RequestedArea > MaxScreenAreaFraction && RequestedArea > KINDA_SMALL_NUMBER)
+	{
+		const float Scale = FMath::Sqrt(MaxScreenAreaFraction / RequestedArea);
+		WidthFraction  *= Scale;
+		HeightFraction *= Scale;
+	}
+
+	// Max rather than fixed overrides: a panel with little in it should stay small. The cap is a
+	// ceiling on how much screen this may take, not an instruction to fill that much.
+	ClampBox->SetMaxDesiredWidth(ScreenSize.X * WidthFraction);
+	ClampBox->SetMaxDesiredHeight(ScreenSize.Y * HeightFraction);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -253,6 +309,11 @@ void URecordingControllerWidget::NativeDestruct()
 void URecordingControllerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	// Re-applied every frame rather than once on construct: the viewport can be resized, and on
+	// console it changes with the safe-area settings the player picks.
+	ApplyScreenClamp(MyGeometry);
+
 	RefreshControls();
 	RefreshCurrentInput();
 }
@@ -379,43 +440,18 @@ void URecordingControllerWidget::ToggleRecording()
 void URecordingControllerWidget::StartTest()
 {
 	UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem();
-	if (!Subsystem || !Subsystem->IsIdle() || ActiveMatchPlayer)
+	if (!Subsystem)
 	{
 		return;
 	}
 
-	if (!Subsystem->StartMatchInputMode(RecordingFileName, bUseJsonFormat))
-	{
-		UE_LOG(LogInputReplay, Warning,
-			TEXT("Test: could not start MatchInput for '%s'. Is there a recording saved under that name?"),
-			*RecordingFileName);
-		return;
-	}
-
-	TSubclassOf<UMatchVideoPlayerWidget> PlayerClass = MatchPlayerClass;
-	if (!PlayerClass) { PlayerClass = UMatchVideoPlayerWidget::StaticClass(); }
-
-	ActiveMatchPlayer = CreateWidget<UMatchVideoPlayerWidget>(this, PlayerClass);
-	if (!ActiveMatchPlayer)
-	{
-		Subsystem->StopMatchInputMode();
-		return;
-	}
-
-	ActiveMatchPlayer->IconMapping = IconMapping;
-	ActiveMatchPlayer->CueMarkerClass = CueMarkerClass;
-	ActiveMatchPlayer->OnClosed.AddDynamic(this, &URecordingControllerWidget::HandlePlayerClosed);
-	ActiveMatchPlayer->AddToViewport(MatchPlayerZOrder);
-
-	// Hide the controller while the full-screen player is up; HandlePlayerClosed brings it back.
-	SetVisibility(ESlateVisibility::Collapsed);
-}
-
-void URecordingControllerWidget::HandlePlayerClosed(bool bCompletedAllCues)
-{
-	ActiveMatchPlayer = nullptr;
-	SetVisibility(ESlateVisibility::Visible);
-	RefreshControls();
+	// Test now leaves the gameplay map entirely rather than pushing a full-screen widget over it.
+	//
+	// The review UI lives in ControlRecapLevel with its own game mode and player controller, so it can
+	// lock input and own the whole screen without negotiating with whatever the gameplay map is doing.
+	// The subsystem handles the rest: stop, save, commit the session, then travel. This widget is
+	// destroyed by that travel, which is why there is no "bring the panel back" path any more.
+	Subsystem->RunControlRecapTest();
 }
 
 // ---------------------------------------------------------------------------------------------

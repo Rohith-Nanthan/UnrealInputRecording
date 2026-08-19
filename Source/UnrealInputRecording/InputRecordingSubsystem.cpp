@@ -13,6 +13,11 @@
 #include "InputReplay/InputRecordingAssetTools.h"
 #include "InputReplay/InputRecordingDataAsset.h"
 #include "InputReplay/InputReplaySerializer.h"
+#include "Blueprint/UserWidget.h"
+#include "Kismet/GameplayStatics.h"
+#include "Storage/RecordingStore.h"
+#include "UI/RecordingControllerWidget.h"
+#include "UI/RecordingToastWidget.h"
 #include "Video/InputRecordingScreenRecorder.h"
 #include "Video/InputRecordingVideoPlayer.h"
 #include "Video/InputRecordingVideoTypes.h"
@@ -25,12 +30,19 @@ void UInputRecordingSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
+	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
+	if (Settings)
 	{
 		ActiveRecordingName = Settings->DefaultRecordingName;
 		bCaptureVideoWithRecording = Settings->bCaptureVideoWithRecording;
 		bPlayVideoDuringMatchInput = Settings->bPlayVideoDuringMatchInput;
 	}
+
+	// The store scans, migrates the old flat layout, and trims to quota during Initialize, so by the
+	// time anything can ask for a recording the folder is in a known state. Doing this lazily on first
+	// record would put a directory walk and possibly several deletes in the middle of a take.
+	SessionStore = NewObject<URecordingStore>(this, TEXT("RecordingStore"));
+	SessionStore->Initialize(Settings ? Settings->GetQuotaBytes() : 900 * ::RecordingStore::BytesPerMegabyte);
 
 	// The video playhead has to be corrected every frame, and a GameInstanceSubsystem does not tick.
 	// Registering here rather than making the widget responsible means sync is correct even with no UI
@@ -125,8 +137,147 @@ bool UInputRecordingSubsystem::TickVideoSync(float DeltaSeconds)
 		}
 	}
 
+	TickQuotaGuard(DeltaSeconds);
+
 	// Keep ticking for the subsystem's lifetime; Deinitialize removes the handle.
 	return true;
+}
+
+void UInputRecordingSubsystem::TickQuotaGuard(float DeltaSeconds)
+{
+	if (!SessionStore || !ActiveSession.IsValid() || !IsRecording())
+	{
+		return;
+	}
+
+	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
+	if (Settings && !Settings->bStopRecordingWhenQuotaReached)
+	{
+		return;
+	}
+
+	QuotaPollAccumulator += DeltaSeconds;
+	if (QuotaPollAccumulator < 1.f)
+	{
+		return;
+	}
+	QuotaPollAccumulator = 0.f;
+
+	// Only the growing file needs measuring - every other session's size was settled at scan time, and
+	// stat-ing the whole tree once a second during a take would be wasteful for no extra information.
+	const int64 LiveBytes = ScreenRecorder
+		? FMath::Max<int64>(0, IFileManager::Get().FileSize(*ScreenRecorder->GetOutputPath()))
+		: 0;
+
+	const int64 CommittedBytes = SessionStore->GetTotalBytes() - ActiveSession.TotalBytes;
+
+	if (CommittedBytes + LiveBytes < SessionStore->GetQuotaBytes())
+	{
+		return;
+	}
+
+	// Hard stop rather than evicting to make room. Deleting another session while this one is still
+	// being written trades a finished recording for an unfinished one, and on console that is a
+	// trade you can lose twice - the eviction is not instant and the encoder does not pause for it.
+	UE_LOG(LogRecordingStore, Warning,
+		TEXT("Quota reached mid-take (%s of %s). Stopping the recording now; what has been captured ")
+		TEXT("so far is still saved."),
+		*::RecordingStore::FormatBytes(CommittedBytes + LiveBytes),
+		*::RecordingStore::FormatBytes(SessionStore->GetQuotaBytes()));
+
+	bActiveTakeStoppedByQuota = true;
+	StopRecording();
+}
+
+// ---------------------------------------------------------------------------------------------
+// UI ownership
+// ---------------------------------------------------------------------------------------------
+
+void UInputRecordingSubsystem::ShowRecordingController()
+{
+	if (ControllerWidget)
+	{
+		if (!ControllerWidget->IsInViewport())
+		{
+			ControllerWidget->AddToViewport(RecordingControllerZOrder);
+		}
+		ControllerWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		return;
+	}
+
+	APlayerController* PlayerController = GetGameInstance()
+		? GetGameInstance()->GetFirstLocalPlayerController()
+		: nullptr;
+
+	if (!PlayerController)
+	{
+		// Called before there is a local player - during Initialize, or between travels. The next
+		// StartRecording will raise it.
+		return;
+	}
+
+	// A Blueprint subclass is the styling hook; falling back to the C++ class means the panel always
+	// appears even in a project that never made one.
+	UClass* WidgetClass = ControllerWidgetClass.IsNull()
+		? URecordingControllerWidget::StaticClass()
+		: ControllerWidgetClass.LoadSynchronous();
+
+	if (!WidgetClass)
+	{
+		WidgetClass = URecordingControllerWidget::StaticClass();
+	}
+
+	ControllerWidget = CreateWidget<URecordingControllerWidget>(PlayerController, WidgetClass);
+	if (ControllerWidget)
+	{
+		ControllerWidget->AddToViewport(RecordingControllerZOrder);
+	}
+}
+
+void UInputRecordingSubsystem::HideRecordingController()
+{
+	if (ControllerWidget && ControllerWidget->IsInViewport())
+	{
+		ControllerWidget->RemoveFromParent();
+	}
+}
+
+bool UInputRecordingSubsystem::IsRecordingControllerVisible() const
+{
+	return ControllerWidget && ControllerWidget->IsInViewport();
+}
+
+void UInputRecordingSubsystem::ShowToast(const FString& Message, float DurationSeconds)
+{
+	UE_LOG(LogInputReplay, Log, TEXT("%s"), *Message);
+
+	APlayerController* PlayerController = GetGameInstance()
+		? GetGameInstance()->GetFirstLocalPlayerController()
+		: nullptr;
+
+	if (!PlayerController)
+	{
+		return;
+	}
+
+	if (!ToastWidget)
+	{
+		UClass* WidgetClass = ToastWidgetClass.IsNull()
+			? URecordingToastWidget::StaticClass()
+			: ToastWidgetClass.LoadSynchronous();
+
+		if (!WidgetClass)
+		{
+			WidgetClass = URecordingToastWidget::StaticClass();
+		}
+
+		ToastWidget = CreateWidget<URecordingToastWidget>(PlayerController, WidgetClass);
+	}
+
+	if (ToastWidget)
+	{
+		ToastWidget->ShowMessage(Message, DurationSeconds);
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -385,18 +536,48 @@ bool UInputRecordingSubsystem::StartRecording(const FString& DisplayName)
 			TEXT("Contexts on the component, or set them in Project Settings > Game > Input Recording."));
 	}
 
+	if (!bStarted)
+	{
+		BroadcastModeChanged();
+		return false;
+	}
+
+	// Claim the session only once input recording is definitely running. Doing it earlier would burn
+	// an index and create a folder for every failed start, and those folders would count against the
+	// quota until someone noticed them.
+	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
+	const int64 Reservation = Settings ? Settings->GetReserveBytesPerTake() : 150 * ::RecordingStore::BytesPerMegabyte;
+
+	const FString MapName = GetWorld() ? GetWorld()->GetMapName() : FString();
+	ActiveSession = SessionStore->BeginSession(DisplayName, MapName, Reservation);
+
+	if (!ActiveSession.IsValid())
+	{
+		// The store already logged why. Unwind the component so we are not left recording into nothing.
+		UE_LOG(LogInputReplay, Error, TEXT("Could not open a session folder; abandoning the take."));
+		Component->StopRecording();
+		BroadcastModeChanged();
+		return false;
+	}
+
+	bActiveTakeStoppedByQuota = false;
+	QuotaPollAccumulator = 0.f;
+
 	// Video starts only once input recording is definitely running, so a failed take never leaves an
 	// orphan .mp4 behind. The reverse ordering is deliberately *not* used: a video with no .ghost is
 	// useless to this system, whereas a .ghost with no video degrades gracefully everywhere.
-	if (bStarted && bCaptureVideoWithRecording)
+	//
+	// Capture writes straight to the session's final path - there is no rename step any more, because
+	// the folder is claimed before the first frame is encoded.
+	if (bCaptureVideoWithRecording)
 	{
-		// The name capture starts under is ActiveRecordingName; if StopRecordingAndSave is later given a
-		// different one, RenameCapturedVideo moves the file so the pair stays intact.
-		GetScreenRecorder()->StartCapture(this, ResolveRecordingName(ActiveRecordingName));
+		GetScreenRecorder()->StartCapture(this, ActiveSession.GetVideoPath());
 	}
 
+	ShowRecordingController();
+
 	BroadcastModeChanged();
-	return bStarted;
+	return true;
 }
 
 bool UInputRecordingSubsystem::StopRecording()
@@ -428,29 +609,83 @@ bool UInputRecordingSubsystem::StopRecordingAndSave(const FString& FileName, boo
 	if (ScreenRecorder && ScreenRecorder->IsCapturing())
 	{
 		ScreenRecorder->StopCapture();
-		ScreenRecorder->RenameCapturedVideo(Name);
 
 		const bool bVideoOk = (ScreenRecorder->GetState() != EInputRecordingVideoState::Failed)
-			&& UInputRecordingVideoLibrary::DoesVideoExist(Name);
+			&& IFileManager::Get().FileExists(*ScreenRecorder->GetOutputPath());
 
 		OnVideoSaved.Broadcast(bVideoOk, ScreenRecorder->GetOutputPath());
 	}
 
-	const bool bSaved = Component->SaveRecordingToFile(Name, bAsJson);
+	// The session base path, not a bare name: both the serializer and the video path helper pass an
+	// absolute path through untouched and append their own extension, so one base produces all three
+	// files inside the session folder with no string surgery here.
+	const bool bHasSession = ActiveSession.IsValid();
+	const FString SaveTarget = bHasSession ? ActiveSession.GetBasePath() : Name;
+
+	const bool bSaved = Component->SaveRecordingToFile(SaveTarget, bAsJson);
 
 	// Writing the readable companion copy by default is what makes the Data Asset workflow painless:
 	// the binary stays authoritative for playback, the JSON is there to read and to import.
 	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
 	if (bSaved && !bAsJson && Settings && Settings->bAlsoExportJsonOnSave)
 	{
-		Component->SaveRecordingToFile(Name, /*bAsJson=*/true);
+		Component->SaveRecordingToFile(SaveTarget, /*bAsJson=*/true);
+	}
+
+	FString SessionPath;
+
+	if (bHasSession)
+	{
+		SessionPath = ActiveSession.AbsolutePath;
+
+		if (bSaved)
+		{
+			// Cues are extracted here rather than read off the component: MatchCues is only populated
+			// while MatchInput is running, so straight after a recording it is empty. The manifest is
+			// the one place that number is worth paying for, since the recap UI shows it before it has
+			// loaded the .ghost.
+			TArray<FMatchInputCue> Cues;
+			UInputMatchLibrary::BuildMatchInputCues(
+				Component->GetRecording(), Component->MatchCueOptions, Cues);
+
+			SessionStore->CommitSession(
+				ActiveSession.Index,
+				Component->GetRecording().GetDurationSeconds(),
+				Cues.Num());
+
+			LastSavedSessionPath = SessionPath;
+		}
+		else
+		{
+			// Nothing usable was written, so the folder is just quota being held hostage.
+			UE_LOG(LogInputReplay, Error, TEXT("Saving failed; discarding session %s."), *ActiveSession.FolderName);
+			SessionStore->AbortSession(ActiveSession.Index);
+		}
+
+		ActiveSession = FRecordingSessionInfo();
 	}
 
 	if (bSaved)
 	{
-		UE_LOG(LogInputReplay, Log, TEXT("Recording saved as '%s' in %s"),
-			*Name, *UInputReplaySerializer::GetRecordingDirectory());
+		UE_LOG(LogInputReplay, Log, TEXT("Recording saved to %s"), *SessionPath);
 	}
+
+	HideRecordingController();
+
+	OnRecordingSaved.Broadcast(bSaved, SessionPath, bActiveTakeStoppedByQuota);
+
+	if (bSaved)
+	{
+		ShowToast(bActiveTakeStoppedByQuota
+			? FString::Printf(TEXT("Storage full - recording stopped early and saved to %s"), *SessionPath)
+			: FString::Printf(TEXT("Recording successful, saved to %s"), *SessionPath));
+	}
+	else
+	{
+		ShowToast(TEXT("Recording failed - nothing was saved. See the log for details."));
+	}
+
+	bActiveTakeStoppedByQuota = false;
 
 	BroadcastModeChanged();
 	return bSaved;
@@ -475,9 +710,99 @@ void UInputRecordingSubsystem::StopRecordingWithoutSaving()
 	}
 }
 
+void UInputRecordingSubsystem::CancelRecording()
+{
+	if (UInputReplayComponent* Component = FindReplayComponent())
+	{
+		Component->StopRecording();
+	}
+
+	if (ScreenRecorder && ScreenRecorder->IsCapturing())
+	{
+		ScreenRecorder->StopCapture();
+	}
+
+	// AbortSession deletes the whole folder, so there is no need to unlink the .mp4 individually -
+	// and doing so first would only race the encoder's final write.
+	if (ActiveSession.IsValid() && SessionStore)
+	{
+		SessionStore->AbortSession(ActiveSession.Index);
+		ActiveSession = FRecordingSessionInfo();
+	}
+
+	bActiveTakeStoppedByQuota = false;
+
+	HideRecordingController();
+	ShowToast(TEXT("Recording cancelled - nothing was kept."));
+
+	BroadcastModeChanged();
+}
+
+void UInputRecordingSubsystem::RunControlRecapTest()
+{
+	// Stopping saves and commits, which is what makes the take reachable from the recap map. A test
+	// that discarded the recording it was about to review would be worse than useless.
+	if (IsRecording())
+	{
+		StopRecording();
+	}
+
+	HideRecordingController();
+
+	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
+	if (!Settings || Settings->ControlRecapMap.IsNull())
+	{
+		UE_LOG(LogInputReplay, Error,
+			TEXT("Test needs a Control Recap Map in Project Settings > Game > Input Recording."));
+		ShowToast(TEXT("No control recap map is configured."));
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	UE_LOG(LogInputReplay, Log, TEXT("Opening the control recap map '%s'."),
+		*Settings->ControlRecapMap.ToString());
+
+	// The recap map picks its own session up on load - see AControlRecapPlayerController. Passing it
+	// through here as an option would only duplicate that logic and disagree with the boot flag path.
+	UGameplayStatics::OpenLevelBySoftObjectPtr(World, TSoftObjectPtr<UWorld>(Settings->ControlRecapMap));
+}
+
+void UInputRecordingSubsystem::RequestVideoFrameDump()
+{
+	GetScreenRecorder()->RequestFrameDump();
+}
+
 // ---------------------------------------------------------------------------------------------
 // MatchInput
 // ---------------------------------------------------------------------------------------------
+
+bool UInputRecordingSubsystem::StartMatchInputFromSession(const FRecordingSessionInfo& Session)
+{
+	if (!Session.IsPlayable())
+	{
+		UE_LOG(LogInputMatch, Error,
+			TEXT("Session '%s' has no .ghost and cannot be replayed."), *Session.FolderName);
+		return false;
+	}
+
+	// Touch before starting, not after: a session that is being reviewed should already be protected
+	// from eviction by the time anything else can ask the store for room.
+	if (SessionStore)
+	{
+		SessionStore->TouchSession(Session.Index);
+	}
+
+	ActiveRecordingName = Session.FolderName;
+
+	// The absolute base path resolves to the .ghost and the .mp4 in one go; StartMatchInputMode passes
+	// absolute paths through to the serializer untouched.
+	return StartMatchInputMode(Session.GetBasePath(), /*bJson=*/false);
+}
 
 bool UInputRecordingSubsystem::StartMatchInputMode(const FString& FileName, bool bJson)
 {

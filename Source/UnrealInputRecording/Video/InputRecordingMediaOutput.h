@@ -55,6 +55,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|Video")
 	FInputRecordingVideoOptions EncoderOptions;
 
+	/**
+	 * Write the first frame of this capture out as a PNG next to the .mp4.
+	 *
+	 * A one-shot, set by ir.video.dumpframe before the next take starts. It lives here rather than in
+	 * EncoderOptions because it is a debugging action for one capture, not a setting that should
+	 * persist into DefaultGame.ini.
+	 */
+	UPROPERTY(Transient, BlueprintReadWrite, Category = "Input Recording|Video")
+	bool bDumpFirstFrame = false;
+
 	//~ Begin UMediaOutput interface
 	virtual bool Validate(FString& OutFailureReason) const override;
 	virtual FIntPoint GetRequestedSize() const override { return Resolution; }

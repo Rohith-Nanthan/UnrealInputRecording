@@ -48,14 +48,25 @@ struct FInputRecordingVideoEncoderConfig
 	int32 MaxQueuedFrames = 6;
 
 	/**
-	 * Flip the image vertically before encoding.
+	 * Whether to reverse row order while copying into the encoder's buffer.
 	 *
-	 * The default (false) is correct for the stock pipeline: UMediaCapture delivers the viewport
-	 * top-down and the H.264 encoder MFT consumes MFVideoFormat_RGB32 top-down, so a straight copy
-	 * preserves orientation. Set true only if a particular encoder reads bottom-up and the video
-	 * comes out inverted.
+	 * This is the *resolved* answer, not the user's setting: UInputRecordingMediaCapture turns
+	 * FInputRecordingVideoOptions::Orientation into a plain bool before it gets here, so the backend
+	 * never has to reason about what Auto means on this platform.
+	 *
+	 * The flip is free either way - the frame is already copied a row at a time to strip readback
+	 * padding, so reversing the destination index costs nothing but cache locality.
 	 */
 	bool bFlipVertical = false;
+
+	/**
+	 * Write the first encoded frame out as a PNG beside the .mp4 and clear the flag.
+	 *
+	 * Orientation is the one property of this pipeline that cannot be asserted in code - it depends
+	 * on which conversion the sink writer picks at runtime. A single PNG settles it in seconds, and
+	 * PNG specifically because it has exactly one row order, unlike BMP.
+	 */
+	bool bDumpFirstFrame = false;
 };
 
 class IInputRecordingVideoEncoder
