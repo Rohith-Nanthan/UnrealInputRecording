@@ -39,13 +39,23 @@ void AControlRecapPlayerController::BeginPlay()
 
 	const bool bHasSession = ResolveSessionToReview(ReviewedSession);
 
-	UClass* WidgetClass = RecapWidgetClass.IsNull()
-		? UControlRecapWidget::StaticClass()
-		: RecapWidgetClass.LoadSynchronous();
+	// This controller's own RecapWidgetClass wins when set, so one recap level can use a different
+	// layout; otherwise the project setting supplies it. UControlRecapWidget builds no tree of its
+	// own, so an unset class means a blank screen - LoadWidgetClass says so in the log.
+	UClass* WidgetClass = nullptr;
+
+	if (!RecapWidgetClass.IsNull())
+	{
+		WidgetClass = RecapWidgetClass.LoadSynchronous();
+	}
 
 	if (!WidgetClass)
 	{
-		WidgetClass = UControlRecapWidget::StaticClass();
+		const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
+		WidgetClass = UInputRecordingSettings::LoadWidgetClass(
+			Settings ? Settings->ControlRecapWidgetClass : FSoftClassPath(),
+			UControlRecapWidget::StaticClass(),
+			TEXT("Control Recap"));
 	}
 
 	RecapWidget = CreateWidget<UControlRecapWidget>(this, WidgetClass);

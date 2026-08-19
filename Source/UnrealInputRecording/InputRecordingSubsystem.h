@@ -176,12 +176,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input Recording|UI")
 	void ShowToast(const FString& Message, float DurationSeconds = 4.f);
 
-	/** Overlay class. A Blueprint subclass set here restyles the panel without touching C++. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")
-	TSoftClassPtr<URecordingControllerWidget> ControllerWidgetClass;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")
-	TSoftClassPtr<URecordingToastWidget> ToastWidgetClass;
+	// Widget classes are configured in Project Settings > Game > Input Recording > UI rather than
+	// here: a GameInstanceSubsystem has no details panel, so a UPROPERTY on it can only be set from
+	// code or Blueprint at runtime - which is no use for something needed the first time a recording
+	// starts. See UInputRecordingSettings::RecordingControllerWidgetClass.
 
 	/** Z order for the overlay. High enough to sit above a typical gameplay HUD. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Recording|UI")

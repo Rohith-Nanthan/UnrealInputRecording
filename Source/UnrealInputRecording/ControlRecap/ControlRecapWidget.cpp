@@ -2,318 +2,64 @@
 
 #include "ControlRecap/ControlRecapWidget.h"
 
-#include "Blueprint/WidgetTree.h"
-#include "Components/Border.h"
 #include "Components/Button.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
-#include "Components/HorizontalBox.h"
-#include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
-#include "Components/Overlay.h"
-#include "Components/OverlaySlot.h"
+#include "Components/PanelWidget.h"
 #include "Components/ProgressBar.h"
 #include "Components/SizeBox.h"
-#include "Components/Spacer.h"
 #include "Components/TextBlock.h"
-#include "Components/VerticalBox.h"
-#include "Components/VerticalBoxSlot.h"
+#include "Engine/GameInstance.h"
+#include "InputRecordingSettings.h"
 #include "InputRecordingSubsystem.h"
+#include "MediaTexture.h"
 #include "Storage/RecordingStore.h"
 #include "UI/InputActionIconMappingDataAsset.h"
 #include "UI/MatchCueMarkerWidget.h"
-#include "UI/VideoSurfaceWidget.h"
-
-namespace
-{
-	/** A circle, as far as Slate is concerned: a rounded box with its radius pinned to half its size. */
-	FSlateBrush MakeDotBrush(const FLinearColor& Color, float Diameter)
-	{
-		FSlateBrush Brush;
-		Brush.DrawAs = ESlateBrushDrawType::RoundedBox;
-		Brush.OutlineSettings.CornerRadii = FVector4(Diameter * 0.5f, Diameter * 0.5f, Diameter * 0.5f, Diameter * 0.5f);
-		Brush.OutlineSettings.RoundingType = ESlateBrushRoundingType::FixedRadius;
-		Brush.TintColor = FSlateColor(Color);
-		Brush.ImageSize = FVector2D(Diameter, Diameter);
-		return Brush;
-	}
-}
+#include "Video/InputRecordingVideoPlayer.h"
 
 // ---------------------------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------------------------
 
-TSharedRef<SWidget> UControlRecapWidget::RebuildWidget()
-{
-	// A Blueprint subclass that laid out its own tree keeps it. Only build the C++ layout when the
-	// designer left the canvas empty, which is the normal case.
-	if (!WidgetTree->RootWidget)
-	{
-		BuildTree();
-	}
-
-	const TSharedRef<SWidget> Result = Super::RebuildWidget();
-
-	OnRecapConstructed();
-
-	return Result;
-}
-
-void UControlRecapWidget::BuildTree()
-{
-	ScreenBorder = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("ScreenBorder"));
-	ScreenBorder->SetBrushColor(ScreenColor);
-	ScreenBorder->SetPadding(ScreenPadding);
-	WidgetTree->RootWidget = ScreenBorder;
-
-	UVerticalBox* ScreenStack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("ScreenStack"));
-	ScreenBorder->SetContent(ScreenStack);
-
-	// ---- Header: cue counter left, Cancel right ----------------------------------------------
-	{
-		UHorizontalBox* HeaderRow = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("HeaderRow"));
-
-		CueCounterText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("CueCounterText"));
-		CueCounterText->SetText(FText::FromString(TEXT("cue 0 / 0")));
-		CueCounterText->SetColorAndOpacity(FSlateColor(PrimaryTextColor));
-		HeaderRow->AddChildToHorizontalBox(CueCounterText);
-
-		SessionLabel = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("SessionLabel"));
-		SessionLabel->SetColorAndOpacity(FSlateColor(MutedTextColor));
-		if (UHorizontalBoxSlot* LabelSlot = HeaderRow->AddChildToHorizontalBox(SessionLabel))
-		{
-			LabelSlot->SetPadding(FMargin(12.f, 0.f, 0.f, 0.f));
-			LabelSlot->SetVerticalAlignment(VAlign_Center);
-		}
-
-		USpacer* HeaderSpacer = WidgetTree->ConstructWidget<USpacer>(USpacer::StaticClass(), TEXT("HeaderSpacer"));
-		if (UHorizontalBoxSlot* SpacerSlot = HeaderRow->AddChildToHorizontalBox(HeaderSpacer))
-		{
-			SpacerSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
-
-		CancelButton = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass(), TEXT("CancelButton"));
-
-		// Focusable by default, and the only focusable control on this screen - which is deliberate.
-		// Cancel is the one thing a player must always be able to reach with a pad, and NativeConstruct
-		// puts initial focus here for exactly that reason.
-		UTextBlock* CancelLabel = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("CancelLabel"));
-		CancelLabel->SetText(FText::FromString(TEXT("Cancel")));
-		CancelLabel->SetColorAndOpacity(FSlateColor(PrimaryTextColor));
-		CancelButton->AddChild(CancelLabel);
-
-		HeaderRow->AddChildToHorizontalBox(CancelButton);
-
-		if (UVerticalBoxSlot* HeaderSlot = ScreenStack->AddChildToVerticalBox(HeaderRow))
-		{
-			HeaderSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-			HeaderSlot->SetPadding(FMargin(0.f, 0.f, 0.f, 16.f));
-		}
-	}
-
-	// ---- Video: 80% of the height, prompt pill centred over it -------------------------------
-	{
-		VideoBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("VideoBox"));
-
-		VideoFrame = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("VideoFrame"));
-		VideoFrame->SetBrushColor(VideoFrameColor);
-		VideoFrame->SetPadding(FMargin(0.f));
-		VideoBox->SetContent(VideoFrame);
-
-		UOverlay* VideoOverlay = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("VideoOverlay"));
-		VideoFrame->SetContent(VideoOverlay);
-
-		// The surface itself is added in NativeConstruct - it needs a world to create.
-		EmptyStateText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("EmptyStateText"));
-		EmptyStateText->SetColorAndOpacity(FSlateColor(MutedTextColor));
-		EmptyStateText->SetVisibility(ESlateVisibility::Collapsed);
-		if (UOverlaySlot* EmptySlot = VideoOverlay->AddChildToOverlay(EmptyStateText))
-		{
-			EmptySlot->SetHorizontalAlignment(HAlign_Center);
-			EmptySlot->SetVerticalAlignment(VAlign_Center);
-		}
-
-		PromptPill = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("PromptPill"));
-		PromptPill->SetBrushColor(FLinearColor(0.05f, 0.08f, 0.13f, 0.88f));
-		PromptPill->SetPadding(FMargin(24.f, 12.f));
-		PromptPill->SetVisibility(ESlateVisibility::Collapsed);
-
-		UHorizontalBox* PromptRow = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("PromptRow"));
-		PromptPill->SetContent(PromptRow);
-
-		UTextBlock* WaitingLabel = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("WaitingLabel"));
-		WaitingLabel->SetText(FText::FromString(TEXT("waiting for")));
-		WaitingLabel->SetColorAndOpacity(FSlateColor(MutedTextColor));
-		if (UHorizontalBoxSlot* WaitingSlot = PromptRow->AddChildToHorizontalBox(WaitingLabel))
-		{
-			WaitingSlot->SetVerticalAlignment(VAlign_Center);
-			WaitingSlot->SetPadding(FMargin(0.f, 0.f, 12.f, 0.f));
-		}
-
-		PromptIcon = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("PromptIcon"));
-		if (UHorizontalBoxSlot* IconSlot = PromptRow->AddChildToHorizontalBox(PromptIcon))
-		{
-			IconSlot->SetVerticalAlignment(VAlign_Center);
-			IconSlot->SetPadding(FMargin(0.f, 0.f, 10.f, 0.f));
-		}
-
-		PromptActionText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("PromptActionText"));
-		PromptActionText->SetColorAndOpacity(FSlateColor(PrimaryTextColor));
-		if (UHorizontalBoxSlot* ActionSlot = PromptRow->AddChildToHorizontalBox(PromptActionText))
-		{
-			ActionSlot->SetVerticalAlignment(VAlign_Center);
-		}
-
-		if (UOverlaySlot* PromptSlot = VideoOverlay->AddChildToOverlay(PromptPill))
-		{
-			PromptSlot->SetHorizontalAlignment(HAlign_Center);
-			PromptSlot->SetVerticalAlignment(VAlign_Center);
-		}
-
-		if (UVerticalBoxSlot* VideoSlot = ScreenStack->AddChildToVerticalBox(VideoBox))
-		{
-			VideoSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-		}
-	}
-
-	// ---- Timeline: track, then elapsed/total, then legend -------------------------------------
-	{
-		UVerticalBox* TimelineStack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("TimelineStack"));
-
-		// The marker columns span this height: icon at the top, dot on the bar at the bottom. The two
-		// text rows below sit outside it so a longer clock never squashes the track.
-		const float TrackHeight = FMath::Max(40.f, TimelineHeight - 40.f);
-
-		USizeBox* TrackBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("TrackBox"));
-		TrackBox->SetHeightOverride(TrackHeight);
-
-		UOverlay* TrackLayer = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("TrackLayer"));
-		TrackBox->SetContent(TrackLayer);
-
-		USizeBox* BarBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("BarBox"));
-		BarBox->SetHeightOverride(6.f);
-
-		ProgressBar = WidgetTree->ConstructWidget<UProgressBar>(UProgressBar::StaticClass(), TEXT("ProgressBar"));
-		ProgressBar->SetFillColorAndOpacity(AccentColor);
-		ProgressBar->SetPercent(0.f);
-		BarBox->SetContent(ProgressBar);
-
-		if (UOverlaySlot* BarSlot = TrackLayer->AddChildToOverlay(BarBox))
-		{
-			// Bottom-aligned so the dots land on it and the icons have the space above.
-			BarSlot->SetHorizontalAlignment(HAlign_Fill);
-			BarSlot->SetVerticalAlignment(VAlign_Bottom);
-		}
-
-		MarkerCanvas = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("MarkerCanvas"));
-		if (UOverlaySlot* CanvasSlot = TrackLayer->AddChildToOverlay(MarkerCanvas))
-		{
-			CanvasSlot->SetHorizontalAlignment(HAlign_Fill);
-			CanvasSlot->SetVerticalAlignment(VAlign_Fill);
-		}
-
-		if (UVerticalBoxSlot* TrackSlot = TimelineStack->AddChildToVerticalBox(TrackBox))
-		{
-			TrackSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-		}
-
-		// Elapsed / total.
-		UHorizontalBox* TimeRow = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("TimeRow"));
-
-		ElapsedText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("ElapsedText"));
-		ElapsedText->SetText(FText::FromString(TEXT("0:00")));
-		ElapsedText->SetColorAndOpacity(FSlateColor(MutedTextColor));
-		TimeRow->AddChildToHorizontalBox(ElapsedText);
-
-		USpacer* TimeSpacer = WidgetTree->ConstructWidget<USpacer>(USpacer::StaticClass(), TEXT("TimeSpacer"));
-		if (UHorizontalBoxSlot* SpacerSlot = TimeRow->AddChildToHorizontalBox(TimeSpacer))
-		{
-			SpacerSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
-
-		TotalText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("TotalText"));
-		TotalText->SetText(FText::FromString(TEXT("0:00")));
-		TotalText->SetColorAndOpacity(FSlateColor(MutedTextColor));
-		TimeRow->AddChildToHorizontalBox(TotalText);
-
-		if (UVerticalBoxSlot* TimeSlot = TimelineStack->AddChildToVerticalBox(TimeRow))
-		{
-			TimeSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-			TimeSlot->SetPadding(FMargin(0.f, 6.f, 0.f, 0.f));
-		}
-
-		// Legend. The dot states are the only thing on screen that is colour-coded without a label
-		// attached, so they get one here rather than relying on the player working it out.
-		UHorizontalBox* LegendRow = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("LegendRow"));
-
-		auto AddLegendEntry = [this, LegendRow](const TCHAR* Name, const FLinearColor& Color, const TCHAR* Label)
-		{
-			UImage* Dot = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), Name);
-			Dot->SetBrush(MakeDotBrush(Color, 12.f));
-			if (UHorizontalBoxSlot* DotSlot = LegendRow->AddChildToHorizontalBox(Dot))
-			{
-				DotSlot->SetVerticalAlignment(VAlign_Center);
-				DotSlot->SetPadding(FMargin(0.f, 0.f, 8.f, 0.f));
-			}
-
-			UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-			Text->SetText(FText::FromString(Label));
-			Text->SetColorAndOpacity(FSlateColor(MutedTextColor));
-			if (UHorizontalBoxSlot* TextSlot = LegendRow->AddChildToHorizontalBox(Text))
-			{
-				TextSlot->SetVerticalAlignment(VAlign_Center);
-				TextSlot->SetPadding(FMargin(0.f, 0.f, 24.f, 0.f));
-			}
-		};
-
-		AddLegendEntry(TEXT("LegendPassedDot"), FLinearColor(0.85f, 0.86f, 0.87f, 1.f), TEXT("passed"));
-		AddLegendEntry(TEXT("LegendNextDot"), AccentColor, TEXT("next expected"));
-		AddLegendEntry(TEXT("LegendUpcomingDot"), FLinearColor(0.23f, 0.25f, 0.28f, 1.f), TEXT("upcoming"));
-
-		if (UVerticalBoxSlot* LegendSlot = TimelineStack->AddChildToVerticalBox(LegendRow))
-		{
-			LegendSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-			LegendSlot->SetPadding(FMargin(0.f, 12.f, 0.f, 0.f));
-		}
-
-		if (UVerticalBoxSlot* TimelineSlot = ScreenStack->AddChildToVerticalBox(TimelineStack))
-		{
-			TimelineSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-			TimelineSlot->SetPadding(FMargin(0.f, 20.f, 0.f, 0.f));
-		}
-	}
-}
-
 void UControlRecapWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	ValidateBindings();
 
 	if (CancelButton && !CancelButton->OnClicked.IsAlreadyBound(this, &UControlRecapWidget::HandleCancelClicked))
 	{
 		CancelButton->OnClicked.AddDynamic(this, &UControlRecapWidget::HandleCancelClicked);
 	}
 
-	// Video surface needs a world, so it cannot be built in RebuildWidget.
-	if (!VideoSurface && VideoFrame)
+	// Font sizes are pushed from C++ so the size relationship the design depends on survives however
+	// the Blueprint was authored. Colours too - a red that is not actually red defeats the point of
+	// the mismatch line.
+	if (bOverrideFontSizes)
 	{
-		TSubclassOf<UVideoSurfaceWidget> SurfaceClass = VideoSurfaceClass;
-		if (!SurfaceClass) { SurfaceClass = UVideoSurfaceWidget::StaticClass(); }
-
-		VideoSurface = CreateWidget<UVideoSurfaceWidget>(this, SurfaceClass);
-
-		if (VideoSurface)
+		if (ExpectedInputText)
 		{
-			if (UOverlay* VideoOverlay = Cast<UOverlay>(VideoFrame->GetContent()))
-			{
-				if (UOverlaySlot* SurfaceSlot = VideoOverlay->AddChildToOverlay(VideoSurface))
-				{
-					SurfaceSlot->SetHorizontalAlignment(HAlign_Fill);
-					SurfaceSlot->SetVerticalAlignment(VAlign_Fill);
-				}
+			FSlateFontInfo Font = ExpectedInputText->GetFont();
+			Font.Size = ExpectedInputFontSize;
+			ExpectedInputText->SetFont(Font);
+			ExpectedInputText->SetColorAndOpacity(FSlateColor(ExpectedInputColor));
+		}
 
-				// Added last, so move it behind the prompt and the empty-state text.
-				VideoOverlay->ShiftChild(0, VideoSurface);
-			}
+		if (WrongInputText)
+		{
+			FSlateFontInfo Font = WrongInputText->GetFont();
+			Font.Size = WrongInputFontSize;
+			WrongInputText->SetFont(Font);
+			WrongInputText->SetColorAndOpacity(FSlateColor(WrongInputColor));
+		}
+
+		if (CueCounterText)
+		{
+			FSlateFontInfo Font = CueCounterText->GetFont();
+			Font.Size = CueCounterFontSize;
+			CueCounterText->SetFont(Font);
 		}
 	}
 
@@ -323,7 +69,19 @@ void UControlRecapWidget::NativeConstruct()
 		Subsystem->OnMatchInputMatched.AddDynamic(this, &UControlRecapWidget::HandleMatchInputMatched);
 		Subsystem->OnMatchInputMismatch.AddDynamic(this, &UControlRecapWidget::HandleMatchInputMismatch);
 		Subsystem->OnMatchInputFinished.AddDynamic(this, &UControlRecapWidget::HandleMatchInputFinished);
+
+		// The media texture object is stable across opens, but binding on the event covers the case
+		// where this widget is constructed before the player exists.
+		if (UInputRecordingVideoPlayer* VideoPlayer = Subsystem->GetVideoPlayer())
+		{
+			VideoPlayer->OnVideoOpened.AddUniqueDynamic(this, &UControlRecapWidget::HandleVideoOpened);
+		}
 	}
+
+	RefreshVideoBinding();
+
+	HidePrompt();
+	ClearWrongInput();
 
 	// Focus starts on Cancel so a pad has somewhere to be from the first frame. Without this the
 	// screen accepts navigation input but has nothing focused, which reads as unresponsive.
@@ -331,6 +89,8 @@ void UControlRecapWidget::NativeConstruct()
 	{
 		CancelButton->SetKeyboardFocus();
 	}
+
+	OnRecapConstructed();
 }
 
 void UControlRecapWidget::NativeDestruct()
@@ -341,9 +101,120 @@ void UControlRecapWidget::NativeDestruct()
 		Subsystem->OnMatchInputMatched.RemoveAll(this);
 		Subsystem->OnMatchInputMismatch.RemoveAll(this);
 		Subsystem->OnMatchInputFinished.RemoveAll(this);
+
+		if (UInputRecordingVideoPlayer* VideoPlayer = Subsystem->GetVideoPlayer())
+		{
+			VideoPlayer->OnVideoOpened.RemoveAll(this);
+		}
 	}
 
 	Super::NativeDestruct();
+}
+
+void UControlRecapWidget::ValidateBindings() const
+{
+	TArray<FString> Missing;
+
+	auto Check = [&Missing](const UObject* Bound, const TCHAR* Name)
+	{
+		if (!Bound)
+		{
+			Missing.Add(Name);
+		}
+	};
+
+	Check(VideoImage,         TEXT("VideoImage (Image)"));
+	Check(VideoSizeBox,       TEXT("VideoSizeBox (Size Box)"));
+	Check(CueCounterText,     TEXT("CueCounterText (Text)"));
+	Check(ProgressBar,        TEXT("ProgressBar (Progress Bar)"));
+	Check(MarkerCanvas,       TEXT("MarkerCanvas (Canvas Panel)"));
+	Check(ExpectedInputText,  TEXT("ExpectedInputText (Text)"));
+	Check(WrongInputText,     TEXT("WrongInputText (Text)"));
+	Check(CancelButton,       TEXT("CancelButton (Button)"));
+
+	if (Missing.Num() == 0)
+	{
+		return;
+	}
+
+	// One message listing everything, rather than the one-at-a-time compile errors strict BindWidget
+	// would give. Warning rather than Error: a partly-built layout is a normal state to be in while
+	// designing, and every one of these is null-checked before use.
+	UE_LOG(LogRecordingStore, Warning,
+		TEXT("%s is missing %d UMG binding(s): %s. Add widgets with these exact names to the ")
+		TEXT("Blueprint's tree - see the header for the expected hierarchy."),
+		*GetClass()->GetName(), Missing.Num(), *FString::Join(Missing, TEXT(", ")));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Icons
+// ---------------------------------------------------------------------------------------------
+
+UInputActionIconMappingDataAsset* UControlRecapWidget::ResolveIconMapping()
+{
+	if (ResolvedIconMapping)
+	{
+		return ResolvedIconMapping;
+	}
+
+	// A per-widget override wins, but the project setting is what makes icons work at all for a widget
+	// nobody hand-configured - which is exactly this one, since the recap map creates it from a class
+	// rather than from a placed instance. That gap is why icons were silently missing here.
+	if (IconMapping)
+	{
+		ResolvedIconMapping = IconMapping;
+	}
+	else if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
+	{
+		ResolvedIconMapping = Settings->LoadIconMapping();
+	}
+
+	if (!ResolvedIconMapping)
+	{
+		UE_LOG(LogRecordingStore, Warning,
+			TEXT("No input action icon mapping is available. Set one on this widget, or at ")
+			TEXT("Project Settings > Game > Input Recording > UI > Input Action Icon Mapping. ")
+			TEXT("Cue markers and the expected-input prompt will draw without sprites."));
+	}
+
+	return ResolvedIconMapping;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Video
+// ---------------------------------------------------------------------------------------------
+
+void UControlRecapWidget::RefreshVideoBinding()
+{
+	if (!VideoImage)
+	{
+		return;
+	}
+
+	UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem();
+	UInputRecordingVideoPlayer* VideoPlayer = Subsystem ? Subsystem->GetVideoPlayer() : nullptr;
+	UMediaTexture* Texture = VideoPlayer ? VideoPlayer->GetMediaTexture() : nullptr;
+
+	if (!Texture)
+	{
+		return;
+	}
+
+	// SetBrushResourceObject, not SetBrushFromTexture: a UMediaTexture is a UTexture but not a
+	// UTexture2D, so the typed setter would refuse it.
+	//
+	// Assigned straight to the brush rather than through a material: the recap screen wants the picture
+	// as captured, and a material here would be one more thing to keep in sync with the encoder's
+	// orientation setting.
+	VideoImage->SetBrushResourceObject(Texture);
+}
+
+void UControlRecapWidget::HandleVideoOpened(bool bSuccess, const FString& VideoPath)
+{
+	if (bSuccess)
+	{
+		RefreshVideoBinding();
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -356,8 +227,7 @@ void UControlRecapWidget::BeginReview(const FRecordingSessionInfo& Session)
 
 	if (SessionLabel)
 	{
-		SessionLabel->SetText(FText::FromString(
-			FString::Printf(TEXT("%s.mp4"), *Session.FolderName)));
+		SessionLabel->SetText(FText::FromString(Session.FolderName));
 	}
 
 	UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem();
@@ -373,6 +243,7 @@ void UControlRecapWidget::BeginReview(const FRecordingSessionInfo& Session)
 		return;
 	}
 
+	RefreshVideoBinding();
 	BuildTimeline();
 }
 
@@ -385,10 +256,16 @@ void UControlRecapWidget::ShowEmptyState(const FString& Message)
 	}
 
 	HidePrompt();
+	ClearWrongInput();
 
-	if (VideoSurface)
+	if (VideoImage)
 	{
-		VideoSurface->SetVisibility(ESlateVisibility::Collapsed);
+		VideoImage->SetVisibility(ESlateVisibility::Collapsed);
+	}
+
+	if (LegendPanel)
+	{
+		LegendPanel->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (CueCounterText)
@@ -400,13 +277,10 @@ void UControlRecapWidget::ShowEmptyState(const FString& Message)
 void UControlRecapWidget::BuildTimeline()
 {
 	UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem();
-	if (!Subsystem || !MarkerCanvas)
+	if (!Subsystem)
 	{
 		return;
 	}
-
-	MarkerCanvas->ClearChildren();
-	Markers.Reset();
 
 	Cues = Subsystem->GetMatchCues();
 	TotalDurationSeconds = Subsystem->GetRecordingDurationSeconds();
@@ -428,10 +302,19 @@ void UControlRecapWidget::BuildTimeline()
 		return;
 	}
 
+	if (!MarkerCanvas)
+	{
+		// The rest of the screen still works; only the marker rail is missing.
+		return;
+	}
+
+	MarkerCanvas->ClearChildren();
+	Markers.Reset();
+
 	TSubclassOf<UMatchCueMarkerWidget> MarkerClass = CueMarkerClass;
 	if (!MarkerClass) { MarkerClass = UMatchCueMarkerWidget::StaticClass(); }
 
-	const float TrackHeight = FMath::Max(40.f, TimelineHeight - 40.f);
+	UInputActionIconMappingDataAsset* Icons = ResolveIconMapping();
 
 	Markers.Reserve(Cues.Num());
 	for (int32 Index = 0; Index < Cues.Num(); ++Index)
@@ -443,7 +326,7 @@ void UControlRecapWidget::BuildTimeline()
 			continue;
 		}
 
-		const FSlateBrush Icon = IconMapping ? IconMapping->GetIconForCue(Cues[Index]) : FSlateBrush();
+		const FSlateBrush Icon = Icons ? Icons->GetIconForCue(Cues[Index]) : FSlateBrush();
 		Marker->InitialiseMarker(Index, Cues[Index], Icon);
 
 		if (UCanvasPanelSlot* MarkerSlot = MarkerCanvas->AddChildToCanvas(Marker))
@@ -456,7 +339,7 @@ void UControlRecapWidget::BuildTimeline()
 			MarkerSlot->SetAnchors(FAnchors(Fraction, 0.f));
 			MarkerSlot->SetAlignment(FVector2D(0.5, 0.0));
 			MarkerSlot->SetAutoSize(false);
-			MarkerSlot->SetSize(FVector2D(MarkerColumnWidth, TrackHeight));
+			MarkerSlot->SetSize(FVector2D(MarkerColumnWidth, MarkerTrackHeight));
 			MarkerSlot->SetPosition(FVector2D::ZeroVector);
 		}
 
@@ -500,14 +383,21 @@ void UControlRecapWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// The video's share of the screen is applied here rather than left to fill whatever the other two
-	// rows do not use, so "80% of the canvas" stays true as the header and timeline change size.
-	if (VideoBox)
+	if (VideoSizeBox)
 	{
-		const float AvailableHeight = MyGeometry.GetLocalSize().Y - ScreenPadding.Top - ScreenPadding.Bottom;
+		const float AvailableHeight = MyGeometry.GetLocalSize().Y;
 		if (AvailableHeight > 0.f)
 		{
-			VideoBox->SetHeightOverride(AvailableHeight * VideoScreenFraction);
+			VideoSizeBox->SetHeightOverride(AvailableHeight * VideoScreenFraction);
+		}
+	}
+
+	if (WrongInputTimer > 0.f)
+	{
+		WrongInputTimer -= InDeltaTime;
+		if (WrongInputTimer <= 0.f)
+		{
+			ClearWrongInput();
 		}
 	}
 
@@ -548,8 +438,8 @@ void UControlRecapWidget::RefreshFromMatchClock()
 		LastAppliedCueIndex = CueIndex;
 	}
 
-	// The prompt is driven by the awaiting flag rather than by the cue-presented event, because the
-	// clock also freezes on a mismatch and the prompt has to stay up through that.
+	// Driven by the awaiting flag rather than by the cue-presented event, because the clock also
+	// freezes on a mismatch and the prompt has to stay up through that.
 	if (Subsystem->IsAwaitingMatchInput())
 	{
 		ShowPrompt(CueIndex);
@@ -585,29 +475,68 @@ void UControlRecapWidget::RefreshMarkerStates(int32 ActiveCueIndex)
 
 void UControlRecapWidget::ShowPrompt(int32 CueIndex)
 {
-	if (!PromptPill || !Cues.IsValidIndex(CueIndex))
+	if (!Cues.IsValidIndex(CueIndex))
 	{
 		return;
 	}
 
-	if (PromptActionText)
+	UInputActionIconMappingDataAsset* Icons = ResolveIconMapping();
+
+	if (ExpectedInputText)
 	{
-		PromptActionText->SetText(FText::FromString(Cues[CueIndex].ActionName));
+		// The mapping's display name when it has one ("Jump"), the raw action name otherwise
+		// ("IA_Jump"). Player-facing text should not leak asset naming conventions.
+		ExpectedInputText->SetText(Icons
+			? Icons->GetDisplayNameForCue(Cues[CueIndex])
+			: FText::FromString(Cues[CueIndex].ActionName));
 	}
 
-	if (PromptIcon && IconMapping)
+	if (ExpectedInputIcon)
 	{
-		PromptIcon->SetBrush(IconMapping->GetIconForCue(Cues[CueIndex]));
+		if (Icons)
+		{
+			ExpectedInputIcon->SetBrush(Icons->GetIconForCue(Cues[CueIndex]));
+			ExpectedInputIcon->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+		else
+		{
+			ExpectedInputIcon->SetVisibility(ESlateVisibility::Collapsed);
+		}
 	}
 
-	PromptPill->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (PromptPanel)
+	{
+		PromptPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
 }
 
 void UControlRecapWidget::HidePrompt()
 {
-	if (PromptPill)
+	if (PromptPanel)
 	{
-		PromptPill->SetVisibility(ESlateVisibility::Collapsed);
+		PromptPanel->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	else if (ExpectedInputText)
+	{
+		// No wrapping panel bound - hide the pieces individually so the layout does not keep a stale
+		// prompt on screen between cues.
+		ExpectedInputText->SetVisibility(ESlateVisibility::Collapsed);
+
+		if (ExpectedInputIcon)
+		{
+			ExpectedInputIcon->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+}
+
+void UControlRecapWidget::ClearWrongInput()
+{
+	WrongInputTimer = 0.f;
+
+	if (WrongInputText)
+	{
+		WrongInputText->SetText(FText::GetEmpty());
+		WrongInputText->SetVisibility(ESlateVisibility::Collapsed);
 	}
 }
 
@@ -624,24 +553,42 @@ void UControlRecapWidget::HandleMatchCuePresented(int32 CueIndex, int32 TotalCue
 {
 	RefreshMarkerStates(CueIndex);
 	LastAppliedCueIndex = CueIndex;
+
+	if (ExpectedInputText)
+	{
+		ExpectedInputText->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+
+	ClearWrongInput();
 	ShowPrompt(CueIndex);
 }
 
 void UControlRecapWidget::HandleMatchInputMatched(int32 CueIndex, int32 TotalCues)
 {
 	HidePrompt();
+
+	// Clear on success rather than waiting the timer out: leaving the last mistake up next to a cue
+	// the player just got right reads as though they got that one wrong too.
+	ClearWrongInput();
+
 	RefreshMarkerStates(CueIndex + 1);
 	LastAppliedCueIndex = CueIndex + 1;
 }
 
 void UControlRecapWidget::HandleMatchInputMismatch(const FString& ExpectedInput, const FString& ActualInput)
 {
-	// Feedback lands where the player is already looking rather than as a counter in the corner. The
-	// running total stays in the log and on the subsystem for anyone who wants it.
-	if (PromptPill)
+	if (WrongInputText)
 	{
-		PromptPill->SetBrushColor(FLinearColor(0.24f, 0.06f, 0.07f, 0.92f));
+		const FString Shown = ActualInput.IsEmpty() ? TEXT("something else") : ActualInput;
+
+		WrongInputText->SetText(FText::FromString(FString::Printf(TEXT("you pressed %s"), *Shown)));
+		WrongInputText->SetColorAndOpacity(FSlateColor(WrongInputColor));
+		WrongInputText->SetVisibility(ESlateVisibility::HitTestInvisible);
 	}
+
+	WrongInputTimer = WrongInputDisplaySeconds;
+
+	OnWrongInput(ExpectedInput, ActualInput);
 }
 
 void UControlRecapWidget::HandleMatchInputFinished(bool bCompletedAllCues)

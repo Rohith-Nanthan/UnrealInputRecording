@@ -6,6 +6,8 @@
 #include "InputMappingContext.h"
 #include "InputReplay/InputReplayComponent.h"
 #include "Storage/RecordingSessionTypes.h"
+#include "Blueprint/UserWidget.h"
+#include "UI/InputActionIconMappingDataAsset.h"
 
 UInputRecordingSettings::UInputRecordingSettings()
 {
@@ -19,6 +21,54 @@ const UInputRecordingSettings* UInputRecordingSettings::Get()
 	// GetDefault is the correct accessor for a UDeveloperSettings CDO - it is where the ini values
 	// are loaded into.
 	return GetDefault<UInputRecordingSettings>();
+}
+
+UInputActionIconMappingDataAsset* UInputRecordingSettings::LoadIconMapping() const
+{
+	if (IconMapping.IsNull())
+	{
+		return nullptr;
+	}
+
+	UInputActionIconMappingDataAsset* Loaded = IconMapping.LoadSynchronous();
+
+	if (!Loaded)
+	{
+		// Worth a log rather than a silent null: the symptom downstream is "no icons anywhere", which
+		// reads as a broken sprite pipeline instead of an unresolvable asset reference.
+		UE_LOG(LogInputReplay, Warning,
+			TEXT("Input Action Icon Mapping ('%s') will not load. Recording UIs will draw no icons."),
+			*IconMapping.ToString());
+	}
+
+	return Loaded;
+}
+
+UClass* UInputRecordingSettings::LoadWidgetClass(const FSoftClassPath& ConfiguredClass, UClass* FallbackClass, const TCHAR* ContextName)
+{
+	if (ConfiguredClass.IsValid())
+	{
+		if (UClass* Loaded = ConfiguredClass.TryLoadClass<UUserWidget>())
+		{
+			return Loaded;
+		}
+
+		UE_LOG(LogInputReplay, Error,
+			TEXT("%s widget class '%s' will not load. Falling back to the C++ class, which builds no ")
+			TEXT("layout and will render nothing."),
+			ContextName, *ConfiguredClass.ToString());
+
+		return FallbackClass;
+	}
+
+	// Loud rather than silent: the C++ classes are pure logic now, so an unset class is the difference
+	// between a working screen and a blank one, and a blank screen gives no hint why.
+	UE_LOG(LogInputReplay, Error,
+		TEXT("No %s widget class is set in Project Settings > Game > Input Recording > UI. ")
+		TEXT("That UI will render nothing until a Blueprint is assigned."),
+		ContextName);
+
+	return FallbackClass;
 }
 
 int64 UInputRecordingSettings::GetQuotaBytes() const

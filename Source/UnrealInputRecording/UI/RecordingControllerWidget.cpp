@@ -2,40 +2,21 @@
 
 #include "UI/RecordingControllerWidget.h"
 
-#include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
-#include "Components/CanvasPanel.h"
-#include "Components/CanvasPanelSlot.h"
 #include "Components/Button.h"
-#include "Components/HorizontalBox.h"
-#include "Components/HorizontalBoxSlot.h"
+#include "Components/CanvasPanelSlot.h"
 #include "Components/Image.h"
 #include "Components/ScrollBox.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
-#include "Components/VerticalBox.h"
-#include "Components/VerticalBoxSlot.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "InputRecordingSettings.h"
 #include "InputRecordingSubsystem.h"
-#include "Styling/CoreStyle.h"
+#include "Storage/RecordingSessionTypes.h"
 #include "UI/InputActionIconMappingDataAsset.h"
 #include "UI/SyncPointRowWidget.h"
-
-namespace
-{
-	/** A small helper: a text block with the default mono/regular font at a given size. */
-	UTextBlock* MakeText(UWidgetTree* Tree, const FString& InText, int32 Size, const FLinearColor& Color,
-						  bool bMono = false)
-	{
-		UTextBlock* Text = Tree->ConstructWidget<UTextBlock>();
-		Text->SetText(FText::FromString(InText));
-		Text->SetFont(FCoreStyle::GetDefaultFontStyle(bMono ? "Mono" : "Regular", Size));
-		Text->SetColorAndOpacity(FSlateColor(Color));
-		return Text;
-	}
-}
 
 UInputRecordingSubsystem* URecordingControllerWidget::GetRecordingSubsystem() const
 {
@@ -43,184 +24,158 @@ UInputRecordingSubsystem* URecordingControllerWidget::GetRecordingSubsystem() co
 	return GameInstance ? GameInstance->GetSubsystem<UInputRecordingSubsystem>() : nullptr;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Tree
-// ---------------------------------------------------------------------------------------------
-
-TSharedRef<SWidget> URecordingControllerWidget::RebuildWidget()
+UInputActionIconMappingDataAsset* URecordingControllerWidget::ResolveIconMapping()
 {
-	if (!RootBorder)
+	if (ResolvedIconMapping)
 	{
-		BuildTree();
+		return ResolvedIconMapping;
 	}
-	return Super::RebuildWidget();
+
+	// Per-widget override first, project setting second. The setting is what makes icons appear
+	// without anyone remembering to fill this field in on every Blueprint that shows one.
+	if (IconMapping)
+	{
+		ResolvedIconMapping = IconMapping;
+	}
+	else if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
+	{
+		ResolvedIconMapping = Settings->LoadIconMapping();
+	}
+
+	return ResolvedIconMapping;
 }
 
-void URecordingControllerWidget::BuildTree()
+// ---------------------------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------------------------
+
+void URecordingControllerWidget::NativeConstruct()
 {
-	RootBorder = WidgetTree->ConstructWidget<UBorder>();
-	RootBorder->SetBrushColor(PanelColor);
-	RootBorder->SetPadding(FMargin(16.f));
+	Super::NativeConstruct();
 
-	UVerticalBox* RootVBox = WidgetTree->ConstructWidget<UVerticalBox>();
-	RootBorder->SetContent(RootVBox);
+	ValidateBindings();
 
-	// --- header: title + status pill ---------------------------------------------------------
+	if (RootBorder)
 	{
-		UHorizontalBox* HeaderRow = WidgetTree->ConstructWidget<UHorizontalBox>();
-		if (UVerticalBoxSlot* S = RootVBox->AddChildToVerticalBox(HeaderRow))
-		{
-			S->SetPadding(FMargin(0.f, 0.f, 0.f, 12.f));
-		}
+		RootBorder->SetBrushColor(PanelColor);
+	}
 
-		TitleText = MakeText(WidgetTree, PanelTitle, 15, FLinearColor::White);
-		if (UHorizontalBoxSlot* S = HeaderRow->AddChildToHorizontalBox(TitleText))
-		{
-			S->SetVerticalAlignment(VAlign_Center);
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
+	if (TitleText)
+	{
+		TitleText->SetText(FText::FromString(PanelTitle));
+	}
 
-		StatusPill = WidgetTree->ConstructWidget<UBorder>();
-		StatusPill->SetPadding(FMargin(10.f, 4.f));
-		StatusPill->SetBrushColor(FLinearColor(1.f, 1.f, 1.f, 0.06f));
-		StatusPillText = MakeText(WidgetTree, TEXT("idle"), 12, MutedColor, /*bMono=*/true);
-		StatusPill->SetContent(StatusPillText);
-		if (UHorizontalBoxSlot* S = HeaderRow->AddChildToHorizontalBox(StatusPill))
+	if (TestButtonLabel)
+	{
+		TestButtonLabel->SetText(FText::FromString(TEXT("Test")));
+	}
+
+	if (RecordToggleButton)
+	{
+		RecordToggleButton->OnClicked.AddUniqueDynamic(this, &URecordingControllerWidget::HandleRecordClicked);
+	}
+
+	if (TestButton)
+	{
+		TestButton->OnClicked.AddUniqueDynamic(this, &URecordingControllerWidget::HandleTestClicked);
+	}
+
+	// The Blueprint only has to anchor ClampBox bottom-right; the offset comes from here so the
+	// margin stays a single tunable rather than something baked into the layout.
+	if (ClampBox)
+	{
+		if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(ClampBox->Slot))
 		{
-			S->SetVerticalAlignment(VAlign_Center);
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+			CanvasSlot->SetPosition(FVector2D(-CornerMargin.X, -CornerMargin.Y));
 		}
 	}
 
-	// --- controls: record toggle + test ------------------------------------------------------
+	if (UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem())
 	{
-		UHorizontalBox* ControlsRow = WidgetTree->ConstructWidget<UHorizontalBox>();
-		if (UVerticalBoxSlot* S = RootVBox->AddChildToVerticalBox(ControlsRow))
-		{
-			S->SetPadding(FMargin(0.f, 0.f, 0.f, 12.f));
-		}
+		Subsystem->OnModeChanged.AddUniqueDynamic(this, &URecordingControllerWidget::HandleModeChanged);
+		Subsystem->OnInputSyncPointRecorded.AddUniqueDynamic(this, &URecordingControllerWidget::HandleSyncPointRecorded);
+	}
 
-		RecordToggleButton = WidgetTree->ConstructWidget<UButton>();
-		RecordToggleButton->SetBackgroundColor(DangerColor);
-
-		// UButton is focusable by default, so a gamepad can already reach both of these. Focus movement
-		// between them is Slate's navigation config, not Enhanced Input - see URecordingUIInputConfig
-		// for why that distinction matters.
-		RecordToggleButton->OnClicked.AddDynamic(this, &URecordingControllerWidget::HandleRecordClicked);
-		RecordButtonLabel = MakeText(WidgetTree, TEXT("Start recording"), 14, FLinearColor::White);
-		RecordButtonLabel->SetJustification(ETextJustify::Center);
-		RecordToggleButton->SetContent(RecordButtonLabel);
-		if (UHorizontalBoxSlot* S = ControlsRow->AddChildToHorizontalBox(RecordToggleButton))
+	if (bManagePlayerInputMode)
+	{
+		if (APlayerController* PC = GetOwningPlayer())
 		{
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-			S->SetPadding(FMargin(0.f, 0.f, 10.f, 0.f));
-		}
-
-		TestButton = WidgetTree->ConstructWidget<UButton>();
-		TestButton->SetBackgroundColor(FLinearColor(0.18f, 0.20f, 0.23f, 1.f));
-		TestButton->OnClicked.AddDynamic(this, &URecordingControllerWidget::HandleTestClicked);
-		TestButtonLabel = MakeText(WidgetTree, TEXT("Test"), 14, FLinearColor::White);
-		TestButtonLabel->SetJustification(ETextJustify::Center);
-		TestButton->SetContent(TestButtonLabel);
-		if (UHorizontalBoxSlot* S = ControlsRow->AddChildToHorizontalBox(TestButton))
-		{
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+			FInputModeGameAndUI InputMode;
+			InputMode.SetHideCursorDuringCapture(false);
+			PC->SetInputMode(InputMode);
+			PC->SetShowMouseCursor(true);
+			bPushedInputMode = true;
 		}
 	}
 
-	// --- current input card ------------------------------------------------------------------
+	RefreshControls();
+
+	OnControllerConstructed();
+}
+
+void URecordingControllerWidget::NativeDestruct()
+{
+	if (UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem())
 	{
-		UBorder* Card = WidgetTree->ConstructWidget<UBorder>();
-		Card->SetBrushColor(CardColor);
-		Card->SetPadding(FMargin(12.f));
-		if (UVerticalBoxSlot* S = RootVBox->AddChildToVerticalBox(Card))
-		{
-			S->SetPadding(FMargin(0.f, 0.f, 0.f, 12.f));
-		}
-
-		UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>();
-		Card->SetContent(Row);
-
-		CurrentInputIcon = WidgetTree->ConstructWidget<UImage>();
-		CurrentInputIcon->SetDesiredSizeOverride(FVector2D(34.0, 34.0));
-		if (UHorizontalBoxSlot* S = Row->AddChildToHorizontalBox(CurrentInputIcon))
-		{
-			S->SetVerticalAlignment(VAlign_Center);
-			S->SetPadding(FMargin(0.f, 0.f, 12.f, 0.f));
-		}
-
-		UVerticalBox* TextCol = WidgetTree->ConstructWidget<UVerticalBox>();
-		if (UHorizontalBoxSlot* S = Row->AddChildToHorizontalBox(TextCol))
-		{
-			S->SetVerticalAlignment(VAlign_Center);
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
-
-		CurrentInputName = MakeText(WidgetTree, TEXT("—"), 15, FLinearColor::White, /*bMono=*/true);
-		TextCol->AddChildToVerticalBox(CurrentInputName);
-		CurrentInputSub = MakeText(WidgetTree, TEXT("no input"), 12, MutedColor);
-		TextCol->AddChildToVerticalBox(CurrentInputSub);
+		Subsystem->OnModeChanged.RemoveAll(this);
+		Subsystem->OnInputSyncPointRecorded.RemoveAll(this);
 	}
 
-	// --- sync point history ------------------------------------------------------------------
+	if (bPushedInputMode)
 	{
-		UBorder* Card = WidgetTree->ConstructWidget<UBorder>();
-		Card->SetBrushColor(CardColor);
-		Card->SetPadding(FMargin(12.f));
-		if (UVerticalBoxSlot* S = RootVBox->AddChildToVerticalBox(Card))
+		if (APlayerController* PC = GetOwningPlayer())
 		{
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+			PC->SetInputMode(FInputModeGameOnly());
+			PC->SetShowMouseCursor(false);
 		}
-
-		UVerticalBox* Col = WidgetTree->ConstructWidget<UVerticalBox>();
-		Card->SetContent(Col);
-
-		UHorizontalBox* Header = WidgetTree->ConstructWidget<UHorizontalBox>();
-		if (UVerticalBoxSlot* S = Col->AddChildToVerticalBox(Header))
-		{
-			S->SetPadding(FMargin(0.f, 0.f, 0.f, 8.f));
-		}
-
-		UTextBlock* Label = MakeText(WidgetTree, TEXT("Sync point history"), 12, MutedColor);
-		if (UHorizontalBoxSlot* S = Header->AddChildToHorizontalBox(Label))
-		{
-			S->SetVerticalAlignment(VAlign_Center);
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
-
-		UBorder* Badge = WidgetTree->ConstructWidget<UBorder>();
-		Badge->SetPadding(FMargin(10.f, 2.f));
-		Badge->SetBrushColor(FLinearColor(AccentColor.R, AccentColor.G, AccentColor.B, 0.16f));
-		HistoryCountBadge = MakeText(WidgetTree, TEXT("0 total"), 12, AccentColor, /*bMono=*/true);
-		Badge->SetContent(HistoryCountBadge);
-		Header->AddChildToHorizontalBox(Badge);
-
-		HistoryScroll = WidgetTree->ConstructWidget<UScrollBox>();
-		HistoryScroll->SetScrollBarVisibility(ESlateVisibility::Collapsed);
-		if (UVerticalBoxSlot* S = Col->AddChildToVerticalBox(HistoryScroll))
-		{
-			S->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		}
+		bPushedInputMode = false;
 	}
 
-	// The panel is pinned to the bottom-right corner and capped at a share of the screen, so it sits
-	// out of the way of whatever the player is actually doing. A canvas is the only panel that can
-	// anchor to a corner without stretching, and the size box between it and the border is what caps
-	// the footprint - see ApplyScreenClamp.
-	UCanvasPanel* RootCanvas = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
+	Super::NativeDestruct();
+}
 
-	ClampBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("ClampBox"));
-	ClampBox->SetContent(RootBorder);
+void URecordingControllerWidget::ValidateBindings() const
+{
+	TArray<FString> Missing;
 
-	if (UCanvasPanelSlot* ClampSlot = RootCanvas->AddChildToCanvas(ClampBox))
+	auto Check = [&Missing](const UObject* Bound, const TCHAR* Name)
 	{
-		ClampSlot->SetAnchors(FAnchors(1.f, 1.f));
-		ClampSlot->SetAlignment(FVector2D(1.0, 1.0));
-		ClampSlot->SetPosition(FVector2D(-CornerMargin.X, -CornerMargin.Y));
-		ClampSlot->SetAutoSize(true);
+		if (!Bound)
+		{
+			Missing.Add(Name);
+		}
+	};
+
+	Check(ClampBox,           TEXT("ClampBox (Size Box)"));
+	Check(RecordToggleButton, TEXT("RecordToggleButton (Button)"));
+	Check(RecordButtonLabel,  TEXT("RecordButtonLabel (Text)"));
+	Check(TestButton,         TEXT("TestButton (Button)"));
+	Check(StatusPillText,     TEXT("StatusPillText (Text)"));
+	Check(CurrentInputName,   TEXT("CurrentInputName (Text)"));
+	Check(CurrentInputIcon,   TEXT("CurrentInputIcon (Image)"));
+	Check(HistoryScroll,      TEXT("HistoryScroll (Scroll Box)"));
+
+	if (Missing.Num() == 0)
+	{
+		return;
 	}
 
-	WidgetTree->RootWidget = RootCanvas;
+	UE_LOG(LogRecordingStore, Warning,
+		TEXT("%s is missing %d UMG binding(s): %s. Add widgets with these exact names to the ")
+		TEXT("Blueprint's tree - see the header for the expected hierarchy."),
+		*GetClass()->GetName(), Missing.Num(), *FString::Join(Missing, TEXT(", ")));
+}
+
+void URecordingControllerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	// Re-applied every frame rather than once on construct: the viewport can be resized, and on
+	// console it changes with the safe-area settings the player picks.
+	ApplyScreenClamp(MyGeometry);
+
+	RefreshControls();
+	RefreshCurrentInput();
 }
 
 void URecordingControllerWidget::ApplyScreenClamp(const FGeometry& MyGeometry)
@@ -257,68 +212,6 @@ void URecordingControllerWidget::ApplyScreenClamp(const FGeometry& MyGeometry)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------------------------
-
-void URecordingControllerWidget::NativeConstruct()
-{
-	Super::NativeConstruct();
-
-	if (UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem())
-	{
-		Subsystem->OnModeChanged.AddUniqueDynamic(this, &URecordingControllerWidget::HandleModeChanged);
-		Subsystem->OnInputSyncPointRecorded.AddUniqueDynamic(this, &URecordingControllerWidget::HandleSyncPointRecorded);
-	}
-
-	if (bManagePlayerInputMode)
-	{
-		if (APlayerController* PC = GetOwningPlayer())
-		{
-			FInputModeGameAndUI InputMode;
-			InputMode.SetHideCursorDuringCapture(false);
-			PC->SetInputMode(InputMode);
-			PC->SetShowMouseCursor(true);
-			bPushedInputMode = true;
-		}
-	}
-
-	RefreshControls();
-}
-
-void URecordingControllerWidget::NativeDestruct()
-{
-	if (UInputRecordingSubsystem* Subsystem = GetRecordingSubsystem())
-	{
-		Subsystem->OnModeChanged.RemoveAll(this);
-		Subsystem->OnInputSyncPointRecorded.RemoveAll(this);
-	}
-
-	if (bPushedInputMode)
-	{
-		if (APlayerController* PC = GetOwningPlayer())
-		{
-			PC->SetInputMode(FInputModeGameOnly());
-			PC->SetShowMouseCursor(false);
-		}
-		bPushedInputMode = false;
-	}
-
-	Super::NativeDestruct();
-}
-
-void URecordingControllerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
-{
-	Super::NativeTick(MyGeometry, InDeltaTime);
-
-	// Re-applied every frame rather than once on construct: the viewport can be resized, and on
-	// console it changes with the safe-area settings the player picks.
-	ApplyScreenClamp(MyGeometry);
-
-	RefreshControls();
-	RefreshCurrentInput();
-}
-
-// ---------------------------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------------------------
 
@@ -336,6 +229,7 @@ void URecordingControllerWidget::RefreshControls()
 	{
 		RecordButtonLabel->SetText(FText::FromString(bRecording ? TEXT("Stop recording") : TEXT("Start recording")));
 	}
+
 	if (RecordToggleButton)
 	{
 		RecordToggleButton->SetBackgroundColor(bRecording ? DangerColor : AccentColor);
@@ -378,21 +272,27 @@ void URecordingControllerWidget::RefreshCurrentInput()
 	if (bHasInput)
 	{
 		CurrentInputName->SetText(FText::FromString(ActionName));
+
 		if (CurrentInputSub)
 		{
 			CurrentInputSub->SetText(FText::FromString(
 				FString::Printf(TEXT("pressed · %.2f"), Value.Size())));
 		}
-		if (CurrentInputIcon && IconMapping)
+
+		if (CurrentInputIcon)
 		{
-			CurrentInputIcon->SetBrush(IconMapping->GetIconForActionName(FName(*ActionName)));
-			CurrentInputIcon->SetDesiredSizeOverride(FVector2D(34.0, 34.0));
-			CurrentInputIcon->SetVisibility(ESlateVisibility::HitTestInvisible);
+			if (UInputActionIconMappingDataAsset* Icons = ResolveIconMapping())
+			{
+				CurrentInputIcon->SetBrush(Icons->GetIconForActionName(FName(*ActionName)));
+				CurrentInputIcon->SetDesiredSizeOverride(CurrentInputIconSize);
+				CurrentInputIcon->SetVisibility(ESlateVisibility::HitTestInvisible);
+			}
 		}
 	}
 	else
 	{
 		CurrentInputName->SetText(FText::FromString(TEXT("—")));
+
 		if (CurrentInputSub) { CurrentInputSub->SetText(FText::FromString(TEXT("no input"))); }
 		if (CurrentInputIcon) { CurrentInputIcon->SetVisibility(ESlateVisibility::Hidden); }
 	}
@@ -445,12 +345,12 @@ void URecordingControllerWidget::StartTest()
 		return;
 	}
 
-	// Test now leaves the gameplay map entirely rather than pushing a full-screen widget over it.
+	// Test leaves the gameplay map entirely rather than pushing a full-screen widget over it.
 	//
 	// The review UI lives in ControlRecapLevel with its own game mode and player controller, so it can
 	// lock input and own the whole screen without negotiating with whatever the gameplay map is doing.
 	// The subsystem handles the rest: stop, save, commit the session, then travel. This widget is
-	// destroyed by that travel, which is why there is no "bring the panel back" path any more.
+	// destroyed by that travel, which is why there is no "bring the panel back" path.
 	Subsystem->RunControlRecapTest();
 }
 
@@ -465,6 +365,7 @@ void URecordingControllerWidget::HandleModeChanged(EInputReplayMode NewMode)
 		RecordStartWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 		ClearHistory();
 	}
+
 	RefreshControls();
 }
 
@@ -484,7 +385,9 @@ void URecordingControllerWidget::HandleSyncPointRecorded(FName ActionName, float
 		return;
 	}
 
-	const FSlateBrush Icon = IconMapping ? IconMapping->GetIconForActionName(ActionName) : FSlateBrush();
+	UInputActionIconMappingDataAsset* Icons = ResolveIconMapping();
+	const FSlateBrush Icon = Icons ? Icons->GetIconForActionName(ActionName) : FSlateBrush();
+
 	Row->SetSyncPoint(Icon, FText::FromName(ActionName), TimeSeconds);
 
 	HistoryScroll->AddChild(Row);
@@ -523,6 +426,7 @@ void URecordingControllerWidget::ClearHistory()
 	{
 		HistoryScroll->ClearChildren();
 	}
+
 	HistoryRows.Reset();
 	SyncPointCount = 0;
 
@@ -534,6 +438,6 @@ void URecordingControllerWidget::ClearHistory()
 
 FString URecordingControllerWidget::FormatClock(float Seconds)
 {
-	const int32 Whole = FMath::Max(0, FMath::FloorToInt(Seconds));
-	return FString::Printf(TEXT("%d:%02d"), Whole / 60, Whole % 60);
+	const int32 Total = FMath::Max(0, FMath::FloorToInt(Seconds));
+	return FString::Printf(TEXT("%d:%02d"), Total / 60, Total % 60);
 }

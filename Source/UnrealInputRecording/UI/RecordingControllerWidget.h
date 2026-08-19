@@ -3,20 +3,30 @@
 // RecordingControllerWidget.h
 //
 // The recording control panel: a Start/Stop toggle, a Test button, a "current input" read-out, and a
-// scrolling sync-point history. Built entirely in C++ (RebuildWidget); a Blueprint subclass restyles
-// through the Style properties and can reach the built panels from OnControllerConstructed.
+// scrolling sync-point history.
+//
+// BLUEPRINT-OWNED LAYOUT
+//   This class builds no widget tree. Every visual element is a BindWidget hook filled in by a
+//   Blueprint child (WBP_RecordingController), so layout and styling are edited in the UMG designer
+//   while the subsystem plumbing stays here.
+//
+//   Bindings are BindWidgetOptional, not BindWidget: strict binding fails Blueprint compilation on
+//   the first name mismatch, which blocks rearranging the tree mid-design and reports one problem at
+//   a time. ValidateBindings() logs every missing hook at once instead, and each is null-checked
+//   before use. Swap any line to BindWidget once your layout is final if you want it enforced.
 //
 // A POP-UP, NOT A HUD ELEMENT
 //   The subsystem owns this widget and raises it from StartRecording, whichever route that came in by
 //   - console command, gameplay code, or the button on this panel. StopRecording takes it away and
-//   replaces it with the save confirmation. It is pinned to the bottom-right corner and capped at a
-//   share of the screen area so it never becomes the thing the player is looking at.
+//   replaces it with the save confirmation.
+//
+//   ClampBox caps the footprint: the Blueprint anchors it bottom-right on a canvas, and C++ sets its
+//   max desired size each frame so the panel never grows past a share of the screen.
 //
 // Data sources (all on UInputRecordingSubsystem):
 //   Current input   - GetLiveInputSnapshot(), polled each tick.
 //   Sync history    - OnInputSyncPointRecorded, one row appended per onset. The last few rows stay
-//                     bright (HistoryHighlightCount) while older ones fade, and the list auto-scrolls
-//                     to the newest.
+//                     bright (HistoryHighlightCount) while older ones fade, and the list auto-scrolls.
 //   Test            - RunControlRecapTest(), which saves the take and travels to ControlRecapLevel.
 //                     This widget does not survive that travel, and does not need to.
 
@@ -30,7 +40,6 @@
 
 class UBorder;
 class UButton;
-class UCanvasPanel;
 class UImage;
 class UInputActionIconMappingDataAsset;
 class UInputRecordingSubsystem;
@@ -38,7 +47,6 @@ class UScrollBox;
 class USizeBox;
 class USyncPointRowWidget;
 class UTextBlock;
-class UVerticalBox;
 
 UCLASS(Blueprintable, meta = (DisplayName = "Recording Controller Widget"))
 class UNREALINPUTRECORDING_API URecordingControllerWidget : public UUserWidget
@@ -46,7 +54,63 @@ class UNREALINPUTRECORDING_API URecordingControllerWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
-	//~ Setup -------------------------------------------------------------------------------------
+	// =========================================================================================
+	// UMG bindings - name these exactly in the Blueprint's widget tree
+	// =========================================================================================
+
+	/**
+	 * Wraps the whole panel and caps its size. Put it in a Canvas Panel anchored bottom-right.
+	 *
+	 * C++ sets MaxDesiredWidth/Height on it every frame - max rather than fixed, so a panel with
+	 * little in it stays small. The cap is a ceiling, not an instruction to fill that much.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<USizeBox> ClampBox;
+
+	/** Panel background. Bound only so a Blueprint can recolour it from PanelColor. */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UBorder> RootBorder;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> TitleText;
+
+	/** "idle" / "rec 0:12". Recoloured to DangerColor while recording. */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> StatusPillText;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UButton> RecordToggleButton;
+
+	/** Text inside RecordToggleButton. Flips between "Start recording" and "Stop recording". */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> RecordButtonLabel;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UButton> TestButton;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> TestButtonLabel;
+
+	/** Sprite for whatever action is being held right now. */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UImage> CurrentInputIcon;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> CurrentInputName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> CurrentInputSub;
+
+	/** Sync-point rows are appended here, one per onset. */
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UScrollBox> HistoryScroll;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> HistoryCountBadge;
+
+	// =========================================================================================
+	// Setup
+	// =========================================================================================
 
 	/** Recording name for Record / Test. Empty falls back to the project's Default Recording Name. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
@@ -59,7 +123,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	bool bUseJsonFormat = false;
 
-	/** Icons for the current-input read-out and the history rows. */
+	/**
+	 * Action -> sprite mapping. Leave empty to use the project setting, which is the normal case.
+	 *
+	 * Only set this to override the icon set for one screen. See ResolveIconMapping().
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	TObjectPtr<UInputActionIconMappingDataAsset> IconMapping;
 
@@ -78,7 +146,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Setup")
 	bool bManagePlayerInputMode = true;
 
-	//~ Screen footprint --------------------------------------------------------------------------
+	// =========================================================================================
+	// Screen footprint
+	// =========================================================================================
 
 	/**
 	 * Largest share of the screen *area* the panel may occupy.
@@ -97,17 +167,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout", meta = (ClampMin = "0.1", ClampMax = "0.9"))
 	float MaxHeightFraction = 0.46f;
 
-	/** Gap between the panel and the bottom-right corner of the viewport. */
+	/**
+	 * Gap between the panel and the bottom-right corner.
+	 *
+	 * Applied to ClampBox's canvas slot when it has one, so the Blueprint only has to anchor the box;
+	 * it does not also have to get the offset right.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Layout")
 	FVector2D CornerMargin = FVector2D(24.0, 24.0);
 
-	//~ Style hooks -------------------------------------------------------------------------------
+	// =========================================================================================
+	// Style
+	// =========================================================================================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Style")
 	FLinearColor PanelColor = FLinearColor(0.05f, 0.06f, 0.07f, 0.94f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Style")
-	FLinearColor CardColor = FLinearColor(0.09f, 0.10f, 0.12f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Style")
 	FLinearColor AccentColor = FLinearColor(0.24f, 0.55f, 1.0f, 1.0f);
@@ -121,7 +195,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Style")
 	FString PanelTitle = TEXT("Recording controller");
 
-	//~ Button handlers (also callable from a Blueprint that wires its own buttons) ---------------
+	/** Size the current-input sprite is drawn at. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recording Controller|Style")
+	FVector2D CurrentInputIconSize = FVector2D(34.0, 34.0);
+
+	// =========================================================================================
+	// API - also callable from a Blueprint that wires its own buttons
+	// =========================================================================================
 
 	UFUNCTION(BlueprintCallable, Category = "Recording Controller")
 	void ToggleRecording();
@@ -133,20 +213,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Recording Controller")
 	void ClearHistory();
 
-	/** Fires after the tree is built, for extra Blueprint styling. */
+	/** Fires once the widget is constructed and bindings are resolved, for extra Blueprint styling. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Recording Controller")
 	void OnControllerConstructed();
 
-	//~ Exposed panels ----------------------------------------------------------------------------
-
-	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets") TObjectPtr<UBorder> RootBorder;
-	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets") TObjectPtr<UButton> RecordToggleButton;
-	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets") TObjectPtr<UButton> TestButton;
-	UPROPERTY(BlueprintReadOnly, Category = "Recording Controller|Widgets") TObjectPtr<UScrollBox> HistoryScroll;
-
 protected:
 	//~ Begin UUserWidget interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
@@ -154,9 +226,14 @@ protected:
 
 	UInputRecordingSubsystem* GetRecordingSubsystem() const;
 
-	void BuildTree();
+	/** Widget's own IconMapping if set, otherwise the project setting. Cached after first resolve. */
+	UInputActionIconMappingDataAsset* ResolveIconMapping();
+
 	void RefreshControls();
 	void RefreshCurrentInput();
+
+	/** Logs every unbound hook in one message. Called once on construct. */
+	void ValidateBindings() const;
 
 private:
 	UFUNCTION() void HandleModeChanged(EInputReplayMode NewMode);
@@ -172,21 +249,8 @@ private:
 
 	static FString FormatClock(float Seconds);
 
-	//~ Built widgets ----------------------------------------------------------------------------
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> TitleText;
-	UPROPERTY(Transient) TObjectPtr<UBorder> StatusPill;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> StatusPillText;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> RecordButtonLabel;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> TestButtonLabel;
-	UPROPERTY(Transient) TObjectPtr<UImage> CurrentInputIcon;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> CurrentInputName;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> CurrentInputSub;
-	UPROPERTY(Transient) TObjectPtr<UTextBlock> HistoryCountBadge;
-
 	UPROPERTY(Transient) TArray<TObjectPtr<USyncPointRowWidget>> HistoryRows;
-
-	/** Wraps the panel and caps its size. Between the root canvas and RootBorder. */
-	UPROPERTY(Transient) TObjectPtr<USizeBox> ClampBox;
+	UPROPERTY(Transient) TObjectPtr<UInputActionIconMappingDataAsset> ResolvedIconMapping;
 
 	int32 SyncPointCount = 0;
 	float RecordStartWorldTime = 0.f;

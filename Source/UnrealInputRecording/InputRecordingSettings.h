@@ -181,6 +181,55 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Control Recap")
 	TSoftObjectPtr<class URecordingUIInputConfig> UIInputConfig;
 
+	//~ UI ---------------------------------------------------------------------------------------
+
+	/**
+	 * Action -> sprite mapping used by every recording UI.
+	 *
+	 * This lives in settings rather than only on the widgets because a widget's own IconMapping is a
+	 * per-Blueprint field, and any widget created straight from its C++ class - which is what the
+	 * control recap map does - has nobody to fill it in. The result was silent: every icon lookup was
+	 * skipped and the markers drew empty brushes, which looks identical to "the sprite is missing"
+	 * rather than "the asset was never assigned".
+	 *
+	 * Widgets prefer their own IconMapping when one is set, and fall back to this. See
+	 * UControlRecapWidget::ResolveIconMapping.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "UI", meta = (DisplayName = "Input Action Icon Mapping"))
+	TSoftObjectPtr<class UInputActionIconMappingDataAsset> IconMapping;
+
+	/** Loads and returns IconMapping, or null. Logs once if the reference will not resolve. */
+	class UInputActionIconMappingDataAsset* LoadIconMapping() const;
+
+	/**
+	 * Blueprint widget classes for the three recording UIs.
+	 *
+	 * These live here because the widgets are created from a class by the subsystem and the recap
+	 * player controller, not placed by hand - and a UGameInstanceSubsystem has no details panel to
+	 * assign them in. Without a config home there would be no way to point the system at a Blueprint
+	 * without editing C++.
+	 *
+	 * All three C++ classes build no widget tree of their own, so leaving one empty means that UI
+	 * renders nothing. The loaders below log an error rather than failing silently.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "UI", meta = (MetaClass = "/Script/UnrealInputRecording.RecordingControllerWidget"))
+	FSoftClassPath RecordingControllerWidgetClass;
+
+	UPROPERTY(config, EditAnywhere, Category = "UI", meta = (MetaClass = "/Script/UnrealInputRecording.ControlRecapWidget"))
+	FSoftClassPath ControlRecapWidgetClass;
+
+	UPROPERTY(config, EditAnywhere, Category = "UI", meta = (MetaClass = "/Script/UnrealInputRecording.RecordingToastWidget"))
+	FSoftClassPath ToastWidgetClass;
+
+	/**
+	 * Loads a configured widget class, falling back to FallbackClass.
+	 *
+	 * @param ConfiguredClass  one of the three paths above
+	 * @param FallbackClass    the C++ class, used only so callers never get null
+	 * @param ContextName      named in the log when the path is empty or will not load
+	 */
+	static UClass* LoadWidgetClass(const FSoftClassPath& ConfiguredClass, UClass* FallbackClass, const TCHAR* ContextName);
+
 	//~ Subsystem -------------------------------------------------------------------------------
 
 	/**

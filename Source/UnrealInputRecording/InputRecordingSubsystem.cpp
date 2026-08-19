@@ -218,14 +218,14 @@ void UInputRecordingSubsystem::ShowRecordingController()
 
 	// A Blueprint subclass is the styling hook; falling back to the C++ class means the panel always
 	// appears even in a project that never made one.
-	UClass* WidgetClass = ControllerWidgetClass.IsNull()
-		? URecordingControllerWidget::StaticClass()
-		: ControllerWidgetClass.LoadSynchronous();
-
-	if (!WidgetClass)
-	{
-		WidgetClass = URecordingControllerWidget::StaticClass();
-	}
+	// The class comes from project settings: URecordingControllerWidget builds no tree of its own, so
+	// the Blueprint *is* the layout and there is nothing meaningful to fall back to when it is unset.
+	// LoadWidgetClass logs loudly in that case rather than leaving a blank corner of the screen.
+	const UInputRecordingSettings* ControllerSettings = UInputRecordingSettings::Get();
+	UClass* WidgetClass = UInputRecordingSettings::LoadWidgetClass(
+		ControllerSettings ? ControllerSettings->RecordingControllerWidgetClass : FSoftClassPath(),
+		URecordingControllerWidget::StaticClass(),
+		TEXT("Recording Controller"));
 
 	ControllerWidget = CreateWidget<URecordingControllerWidget>(PlayerController, WidgetClass);
 	if (ControllerWidget)
@@ -262,14 +262,13 @@ void UInputRecordingSubsystem::ShowToast(const FString& Message, float DurationS
 
 	if (!ToastWidget)
 	{
-		UClass* WidgetClass = ToastWidgetClass.IsNull()
-			? URecordingToastWidget::StaticClass()
-			: ToastWidgetClass.LoadSynchronous();
-
-		if (!WidgetClass)
-		{
-			WidgetClass = URecordingToastWidget::StaticClass();
-		}
+		// The toast is the one widget that still builds a usable default tree in C++, because a save
+		// confirmation that fails to appear is worse than an unstyled one.
+		const UInputRecordingSettings* ToastSettings = UInputRecordingSettings::Get();
+		UClass* WidgetClass = (ToastSettings && ToastSettings->ToastWidgetClass.IsValid())
+			? UInputRecordingSettings::LoadWidgetClass(
+				ToastSettings->ToastWidgetClass, URecordingToastWidget::StaticClass(), TEXT("Recording Toast"))
+			: URecordingToastWidget::StaticClass();
 
 		ToastWidget = CreateWidget<URecordingToastWidget>(PlayerController, WidgetClass);
 	}

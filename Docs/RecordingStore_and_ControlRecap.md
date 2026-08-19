@@ -240,6 +240,91 @@ finished writing is newer than everything and would otherwise win every time.
 
 ---
 
+## 9a. Blueprint-owned UI
+
+Both widget C++ classes build **no widget tree**. Every visual element is a `BindWidgetOptional` hook
+filled in by a Blueprint child, so layout and styling are edited in UMG while the logic stays in C++.
+
+`BindWidgetOptional`, not `BindWidget`, on purpose: strict binding fails Blueprint compilation on the
+first name mismatch, which blocks rearranging a tree mid-design and reports one problem at a time.
+`ValidateBindings()` logs every missing hook in a single message on construct instead, and each is
+null-checked. Once a layout is final, changing a line to `BindWidget` makes it a hard requirement.
+
+Widget classes are configured at **Project Settings → Game → Input Recording → UI**, because a
+`UGameInstanceSubsystem` has no details panel and these widgets are created from a class rather than
+placed by hand.
+
+### WBP_ControlRecap hierarchy
+
+```
+[Canvas Panel] RootCanvas
+└─ [Vertical Box] ScreenStack              anchors full, offsets 40/32/40/28
+   ├─ [Horizontal Box] HeaderRow           Auto
+   │  ├─ [Text] SessionLabel *             Fill
+   │  └─ [Button] CancelButton *           Auto
+   │     └─ [Text] CancelLabel
+   ├─ [Size Box] VideoSizeBox *            Auto — height driven by VideoScreenFraction (0.62)
+   │  └─ [Overlay] VideoOverlay
+   │     ├─ [Image] VideoImage *           Fill/Fill — media texture assigned at runtime
+   │     └─ [Text] EmptyStateText *        Center/Center
+   ├─ [Text] CueCounterText *              Auto, centred   <- below video, above bar
+   ├─ [Size Box] TrackBox                  Auto, height 56
+   │  └─ [Overlay] TrackLayer
+   │     ├─ [Progress Bar] ProgressBar *   Fill/Bottom
+   │     └─ [Canvas Panel] MarkerCanvas *  Fill/Fill — cue markers spawn here
+   ├─ [Horizontal Box] TimeRow             Auto
+   │  ├─ [Text] ElapsedText *              Fill
+   │  └─ [Text] TotalText *                Auto
+   ├─ [Vertical Box] PromptPanel *         Auto, centred
+   │  ├─ [Horizontal Box] ExpectedRow
+   │  │  ├─ [Image] ExpectedInputIcon *    52x52
+   │  │  └─ [Text] ExpectedInputText *     size 42 Bold   <- large
+   │  └─ [Text] WrongInputText *           size 18, red   <- smaller
+   └─ [Horizontal Box] LegendPanel *       Auto, centred
+      ├─ [Image] LegendPassedDot   + [Text] LegendPassedText      8px dot, size 10 text
+      ├─ [Image] LegendNextDot     + [Text] LegendNextText
+      └─ [Image] LegendUpcomingDot + [Text] LegendUpcomingText
+```
+
+### WBP_RecordingController hierarchy
+
+```
+[Canvas Panel] RootCanvas
+└─ [Size Box] ClampBox *                   anchored bottom-right, AutoSize
+   └─ [Border] RootBorder *                padding 16
+      └─ [Vertical Box] PanelStack
+         ├─ [Horizontal Box] HeaderRow
+         │  ├─ [Text] TitleText *          Fill
+         │  └─ [Text] StatusPillText *     Auto
+         ├─ [Horizontal Box] ControlsRow
+         │  ├─ [Button] RecordToggleButton *  Fill
+         │  │  └─ [Text] RecordButtonLabel *
+         │  └─ [Button] TestButton *          Auto
+         │     └─ [Text] TestButtonLabel *
+         ├─ [Horizontal Box] CurrentInputRow
+         │  ├─ [Image] CurrentInputIcon *     34x34
+         │  └─ [Vertical Box] CurrentInputTextCol
+         │     ├─ [Text] CurrentInputName *
+         │     └─ [Text] CurrentInputSub *
+         ├─ [Horizontal Box] HistoryHeaderRow
+         │  ├─ [Text] HistoryLabel
+         │  └─ [Text] HistoryCountBadge *
+         └─ [Scroll Box] HistoryScroll *      Fill
+```
+
+`*` = bound to C++. Rename one and it silently stops updating — the construct log names it.
+
+## 9b. Icon sprites
+
+`Project Settings → Game → Input Recording → UI → Input Action Icon Mapping` points at
+`DA_InputIcons`. Every recording UI resolves icons as: the widget's own `IconMapping` if set,
+otherwise this setting.
+
+The setting exists because a widget's `IconMapping` is a per-Blueprint field, and any widget created
+straight from its C++ class — which is what the control recap map does — has nobody to fill it in.
+The failure was silent: every icon lookup was skipped and markers drew empty brushes, which looks
+exactly like a missing sprite rather than an unassigned asset.
+
 ## 10. Assets
 
 Already created and wired:
