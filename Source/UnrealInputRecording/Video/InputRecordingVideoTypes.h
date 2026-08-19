@@ -88,6 +88,13 @@ struct FInputRecordingVideoOptions
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Video", meta = (ClampMin = "1", ClampMax = "32"))
 	int32 MaxQueuedFrames = 6;
+
+	/**
+	 * Flip the captured image vertically before encoding. Leave off - the stock pipeline is already
+	 * upright. Only flip if a machine's H.264 encoder reads bottom-up and the .mp4 comes out inverted.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Video", AdvancedDisplay)
+	bool bFlipVerticallyOnCapture = false;
 };
 
 /** Path helpers. Kept in a library so Blueprint tooling can resolve the same paths C++ does. */

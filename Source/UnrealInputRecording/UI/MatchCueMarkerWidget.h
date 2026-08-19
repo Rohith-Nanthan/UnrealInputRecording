@@ -2,12 +2,20 @@
 //
 // MatchCueMarkerWidget.h
 //
-// One icon on the timeline track. Optional: UVideoMatchPlayerWidget spawns a plain UImage when no
-// marker class is set, so you get a working timeline with zero extra Blueprints.
+// One sync point on the video timeline, drawn as a full-height column so a single widget carries both
+// layers the design calls for at the same X position:
 //
-// It exists for the moment you want more than an icon - a key-cap frame, a hit flash, a "you are here"
-// pulse - because all of that is animation and layout, which belongs in a Widget Blueprint, not in C++.
-// Derive a WBP from this, add an Image named IconImage, and the base class fills it in for you.
+//     [ icon ]      <- above the bar: which input is expected here
+//     [ "next" ]    <- shown only on the active cue
+//     (   fill  )
+//     [  dot  ]     <- on the bar: state at a glance (passed / next / upcoming)
+//
+// The column is anchored to the full height of the timeline canvas by UMatchVideoPlayerWidget, so the
+// icon rides at the top and the dot lands on the progress bar at the bottom - they can never drift
+// apart because they are the same widget on the same anchor.
+//
+// The whole tree is built in C++ (RebuildWidget); a Blueprint subclass customises the look through the
+// Style properties, not by rebuilding the tree.
 
 #pragma once
 
@@ -19,69 +27,96 @@
 #include "MatchCueMarkerWidget.generated.h"
 
 class UImage;
+class UTextBlock;
+class UVerticalBox;
 
-/** Where a cue sits relative to the player's progress through the sequence. */
+/** Where a cue sits relative to the player's progress. Drives both the icon tint and the dot colour. */
 UENUM(BlueprintType)
 enum class EMatchCueMarkerState : uint8
 {
-	/** Not reached yet. */
 	Pending		UMETA(DisplayName = "Pending"),
-
-	/** This is the cue the system is currently waiting on. */
 	Active		UMETA(DisplayName = "Active"),
-
-	/** Already matched. */
 	Completed	UMETA(DisplayName = "Completed")
 };
 
-UCLASS(Abstract, meta = (DisplayName = "Match Cue Marker Widget"))
+UCLASS(Blueprintable, meta = (DisplayName = "Match Cue Marker Widget"))
 class UNREALINPUTRECORDING_API UMatchCueMarkerWidget : public UUserWidget
 {
 	GENERATED_BODY()
 
 public:
-	/** Called once by the timeline widget right after this marker is added to the canvas. */
+	UMatchCueMarkerWidget(const FObjectInitializer& ObjectInitializer);
+
+	/** Called once by the timeline right after the marker is added to the canvas. */
 	void InitialiseMarker(int32 InCueIndex, const FMatchInputCue& InCue, const FSlateBrush& InIcon);
 
-	/** Set up your own visuals here - the icon and cue data are already populated when this fires. */
-	UFUNCTION(BlueprintImplementableEvent, Category = "Match Input")
-	void OnMarkerInitialised();
-
-	/**
-	 * Drives the marker's appearance as the player advances.
-	 *
-	 * The native implementation tints IconImage: dim for pending, full white for active, half-faded for
-	 * completed. Override in Blueprint (call the parent or not, your choice) to animate instead.
-	 */
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Match Input")
+	/** Cross-fade the marker between the three states. Cheap; safe to call every frame. */
+	UFUNCTION(BlueprintCallable, Category = "Match Cue Marker")
 	void SetMarkerState(EMatchCueMarkerState NewState);
-	virtual void SetMarkerState_Implementation(EMatchCueMarkerState NewState);
 
-	UFUNCTION(BlueprintPure, Category = "Match Input")
+	UFUNCTION(BlueprintPure, Category = "Match Cue Marker")
 	EMatchCueMarkerState GetMarkerState() const { return MarkerState; }
 
-	/** Position of this cue in the sequence. Matches UInputRecordingSubsystem::GetCurrentMatchCueIndex. */
-	UPROPERTY(BlueprintReadOnly, Category = "Match Input")
+	/** Fires after the icon and cue data are populated, for extra Blueprint styling. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Match Cue Marker")
+	void OnMarkerInitialised();
+
+	//~ Read-only cue data -----------------------------------------------------------------------
+
+	UPROPERTY(BlueprintReadOnly, Category = "Match Cue Marker")
 	int32 CueIndex = INDEX_NONE;
 
-	/** The cue itself: timestamp, action name, expected value, pre-formatted description. */
-	UPROPERTY(BlueprintReadOnly, Category = "Match Input")
+	UPROPERTY(BlueprintReadOnly, Category = "Match Cue Marker")
 	FMatchInputCue Cue;
 
-	/** Tints used by the default SetMarkerState implementation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Input|Appearance")
-	FLinearColor PendingTint = FLinearColor(1.0f, 1.0f, 1.0f, 0.35f);
+	//~ Style hooks - safe to override in a Blueprint subclass ------------------------------------
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Input|Appearance")
-	FLinearColor ActiveTint = FLinearColor::White;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor IconPendingTint = FLinearColor(1.f, 1.f, 1.f, 0.35f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Input|Appearance")
-	FLinearColor CompletedTint = FLinearColor(0.35f, 0.85f, 0.4f, 0.8f);
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor IconActiveTint = FLinearColor::White;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor IconCompletedTint = FLinearColor(0.35f, 0.85f, 0.4f, 0.85f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor DotPendingColor = FLinearColor(0.42f, 0.46f, 0.5f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor DotActiveColor = FLinearColor(0.5f, 0.7f, 1.f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FLinearColor DotCompletedColor = FLinearColor(0.79f, 0.82f, 0.87f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FVector2D IconSize = FVector2D(28.0, 28.0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	FVector2D DotSize = FVector2D(12.0, 12.0);
+
+	/** Grown slightly on the active cue so the "next" dot reads as the biggest one on the bar. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Match Cue Marker|Style")
+	float ActiveDotScale = 1.3f;
 
 protected:
-	/** Add a UImage named exactly "IconImage" to your WBP and the cue's icon lands in it. */
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Match Input|Widgets")
-	TObjectPtr<UImage> IconImage;
+	//~ Begin UUserWidget interface
+	virtual TSharedRef<SWidget> RebuildWidget() override;
+	//~ End UUserWidget interface
+
+	/** Constructs the column into WidgetTree. Runs once, guarded on RootColumn. */
+	void BuildTree();
+
+	/** Pushes MarkerState onto the icon tint, the dot colour/size, and the "next" label. */
+	void ApplyState();
+
+	UPROPERTY(Transient) TObjectPtr<UVerticalBox> RootColumn;
+	UPROPERTY(Transient) TObjectPtr<UImage> IconImage;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> NextLabel;
+	UPROPERTY(Transient) TObjectPtr<UImage> DotImage;
+
+	/** The dot's shape - a rounded box rounded to a circle. Tinted per state at runtime. */
+	FSlateBrush DotBrush;
 
 	EMatchCueMarkerState MarkerState = EMatchCueMarkerState::Pending;
 };

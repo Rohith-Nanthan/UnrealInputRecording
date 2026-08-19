@@ -46,6 +46,16 @@ struct FInputRecordingVideoEncoderConfig
 
 	/** Queue depth before frames are dropped rather than stalling the render thread. */
 	int32 MaxQueuedFrames = 6;
+
+	/**
+	 * Flip the image vertically before encoding.
+	 *
+	 * The default (false) is correct for the stock pipeline: UMediaCapture delivers the viewport
+	 * top-down and the H.264 encoder MFT consumes MFVideoFormat_RGB32 top-down, so a straight copy
+	 * preserves orientation. Set true only if a particular encoder reads bottom-up and the video
+	 * comes out inverted.
+	 */
+	bool bFlipVertical = false;
 };
 
 class IInputRecordingVideoEncoder

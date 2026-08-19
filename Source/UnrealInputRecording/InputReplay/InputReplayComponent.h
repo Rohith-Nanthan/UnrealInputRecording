@@ -46,6 +46,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMatchInputMismatch, const FStrin
 /** MatchInput ended. bCompletedAllCues distinguishes "player finished" from "someone called Stop". */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMatchInputFinished, bool, bCompletedAllCues);
 
+/** A tracked action crossed its press threshold while recording - one "sync point" for the debug UI. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInputSyncPointRecorded, FName, ActionName, float, TimeSeconds, FVector, Value);
+
 /**
  * Per-action bookkeeping used while recording. Runtime only - never serialised.
  */
@@ -69,6 +72,9 @@ struct FRecorderActionState
 
 	/** For frame-delta actions (mouse): summed since the last emitted tick. */
 	FVector AccumulatedDelta = FVector::ZeroVector;
+
+	/** Edge latch for the live "sync point" feed: true while this action is over the onset threshold. */
+	bool bOnsetActive = false;
 };
 
 /**
@@ -232,6 +238,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
 	bool bMatchListenToUnrecordedActions = true;
 
+	/**
+	 * Magnitude a tracked action must reach while recording to fire OnInputSyncPointRecorded. Mirrors
+	 * the cue extractor's PressThreshold so the live debug list matches the cues the take will yield.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Recording", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float LiveOnsetThreshold = 0.35f;
+
 	/** Restart from the first cue instead of finishing. Useful for a looping tutorial kiosk. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input Replay|Match Input")
 	bool bLoopMatchInput = false;
@@ -271,6 +284,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
 	FOnMatchInputFinished OnMatchInputFinished;
+
+	/** Fired while recording each time an action crosses the onset threshold. Drives the debug history. */
+	UPROPERTY(BlueprintAssignable, Category = "Input Replay|Events")
+	FOnInputSyncPointRecorded OnInputSyncPointRecorded;
 
 	//~ Begin Public API -------------------------------------------------------------------------
 
@@ -322,6 +339,14 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
 	int32 GetCurrentMatchCueIndex() const { return MatchCueCursor; }
+
+	/**
+	 * The action currently being pressed hardest while recording, for the "current input" debug read-out.
+	 *  false and leaves the out-params untouched when nothing is over the onset threshold (or we
+	 *         are not recording).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Replay|Recording")
+	bool GetLiveInputSnapshot(FString& OutActionName, FVector& OutValue) const;
 
 	/** "IA_Jump [pressed]", or empty when no cue is pending. */
 	UFUNCTION(BlueprintPure, Category = "Input Replay|Match Input")
@@ -465,6 +490,11 @@ private:
 	FInputRecording Recording;
 
 	TArray<FRecorderActionState> RecorderStates;
+
+	/** Dominant live input this recording frame, for GetLiveInputSnapshot. Reset every SampleRecording. */
+	FName LiveInputActionName = NAME_None;
+	FVector LiveInputValue = FVector::ZeroVector;
+	bool bLiveInputActive = false;
 	TArray<FPlaybackActionState> PlaybackStates;
 
 	/** Fixed-step accumulator, shared by record and playback. */

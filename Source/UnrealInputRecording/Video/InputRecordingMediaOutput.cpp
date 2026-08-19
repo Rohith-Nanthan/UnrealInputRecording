@@ -102,6 +102,7 @@ bool UInputRecordingMediaCapture::InitializeCapture()
 	Config.FrameRate       = FMath::Max(1, Output->EncoderOptions.TargetFrameRate);
 	Config.BitRate         = FMath::Max(1, Output->EncoderOptions.BitRateKbps) * 1000;
 	Config.MaxQueuedFrames = FMath::Max(1, Output->EncoderOptions.MaxQueuedFrames);
+	Config.bFlipVertical   = Output->EncoderOptions.bFlipVerticallyOnCapture;
 
 	TUniquePtr<IInputRecordingVideoEncoder> NewEncoder = IInputRecordingVideoEncoder::Create();
 	if (!NewEncoder.IsValid())

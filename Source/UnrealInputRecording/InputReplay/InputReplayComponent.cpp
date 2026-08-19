@@ -283,6 +283,10 @@ void UInputReplayComponent::StartRecording(const FString& DisplayName)
 		State = FRecorderActionState();
 	}
 
+	LiveInputActionName = NAME_None;
+	LiveInputValue = FVector::ZeroVector;
+	bLiveInputActive = false;
+
 	TimeAccumulator = 0.0f;
 	ElapsedSeconds = 0.0f;
 	CurrentFrameIndex = 0;
@@ -303,10 +307,24 @@ void UInputReplayComponent::StopRecording()
 
 	Recording.Header.TotalFrames = CurrentFrameIndex;
 	Mode = EInputReplayMode::Idle;
+	bLiveInputActive = false;
+	LiveInputActionName = NAME_None;
 	OnRecordingStopped.Broadcast();
 
 	UE_LOG(LogInputReplay, Log, TEXT("Recording stopped: %d ticks, %d samples, %.2fs."),
 		Recording.Header.TotalFrames, Recording.Frames.Num(), Recording.GetDurationSeconds());
+}
+
+bool UInputReplayComponent::GetLiveInputSnapshot(FString& OutActionName, FVector& OutValue) const
+{
+	if (!bLiveInputActive)
+	{
+		return false;
+	}
+
+	OutActionName = LiveInputActionName.ToString();
+	OutValue = LiveInputValue;
+	return true;
 }
 
 void UInputReplayComponent::SampleRecording(float DeltaSeconds)
@@ -318,6 +336,12 @@ void UInputReplayComponent::SampleRecording(float DeltaSeconds)
 	}
 
 	// ---- 1. Sample every tracked action for this ENGINE frame -------------------------------
+	// Reset the current-input read-out; the loop below repopulates it from the hardest live press.
+	bLiveInputActive = false;
+	LiveInputActionName = NAME_None;
+	LiveInputValue = FVector::ZeroVector;
+	float FrameDominantMagnitude = 0.0f;
+
 	for (int32 Index = 0; Index < TrackedActions.Num(); ++Index)
 	{
 		const UInputAction* Action = TrackedActions[Index];
@@ -341,6 +365,31 @@ void UInputReplayComponent::SampleRecording(float DeltaSeconds)
 
 		State.LatestValue = Value;
 		State.LatestEvent = Event;
+
+		// Live "sync point" feed + current-input read-out. Non-delta actions only: a mouse delta has no
+		// meaningful "press", and its magnitude spikes every frame the mouse moves. Mirror the cue
+		// extractor - onset = magnitude crossing the threshold from below - so the live list matches the
+		// cues this take will produce.
+		if (!TrackedActionIsDelta[Index])
+		{
+			const float Magnitude = Value.Size();
+			const bool bNowActive = Magnitude >= LiveOnsetThreshold;
+
+			if (bNowActive && !State.bOnsetActive)
+			{
+				OnInputSyncPointRecorded.Broadcast(Action->GetFName(), ElapsedSeconds, Value);
+			}
+			State.bOnsetActive = bNowActive;
+
+			// Track the hardest-pressed action this frame for GetLiveInputSnapshot.
+			if (bNowActive && Magnitude > FrameDominantMagnitude)
+			{
+				FrameDominantMagnitude = Magnitude;
+				LiveInputActionName = Action->GetFName();
+				LiveInputValue = Value;
+				bLiveInputActive = true;
+			}
+		}
 
 		if (TrackedActionIsDelta[Index])
 		{

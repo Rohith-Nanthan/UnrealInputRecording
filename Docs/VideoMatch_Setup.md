@@ -5,6 +5,11 @@ clock, plus a timeline widget that lays cue icons out along a progress bar.
 
 Companion to [MatchInput_Setup.md](MatchInput_Setup.md), which covers the recording system itself.
 
+> **UI update:** the Blueprint-authored HUD has been replaced by C++-driven widgets. Sections 5-8
+> below (the `WBP_VideoMatchPlayer` / `BindWidget` workflow) are superseded by
+> [UI_CppWidgets.md](UI_CppWidgets.md). Sections 1-4 (plugins, project settings, the icon mapping
+> asset) and 9-11 still apply. The video is no longer upside down - see UI_CppWidgets.md section 6.
+
 ---
 
 ## 1. What was added
@@ -17,8 +22,7 @@ Companion to [MatchInput_Setup.md](MatchInput_Setup.md), which covers the record
 | `Video/InputRecordingScreenRecorder.h/.cpp` | `UInputRecordingScreenRecorder` — one take's capture session, owned by the subsystem. |
 | `Video/InputRecordingVideoPlayer.h/.cpp` | `UInputRecordingVideoPlayer` — `UMediaPlayer` + `UMediaTexture`, playhead bound to `MatchClockSeconds`. |
 | `UI/InputActionIconMappingDataAsset.h/.cpp` | `UInputActionIconMappingDataAsset` — `UInputAction` → `FSlateBrush`, keyed by soft path *and* short name. |
-| `UI/MatchCueMarkerWidget.h/.cpp` | Optional per-cue marker widget with Pending / Active / Completed states. |
-| `UI/VideoMatchPlayerWidget.h/.cpp` | `UVideoMatchPlayerWidget` — video surface, timeline track, expected-input prompt. |
+| `UI/*` (widgets) | Now C++-driven — see [UI_CppWidgets.md](UI_CppWidgets.md). |
 | `InputRecordingSubsystem.h/.cpp` | Owns the recorder and the player; starts/stops both alongside the `.ghost`; relays pause/resume. |
 | `InputReplayComponent.h` | Added `GetMatchClockSeconds()`. |
 | `InputRecordingSettings.h` | New **Video** section in Project Settings. |
@@ -38,7 +42,7 @@ RECORD
         ├─ Component::StartRecording()            .ghost buffer starts filling
         └─ ScreenRecorder::StartCapture()
                  UMediaCapture (viewport, BGRA readback, render thread)
-                        │  copy + vertical flip, ~8 MB at 1080p
+                        │  straight copy, ~8 MB at 1080p
                         ▼
                  bounded queue (drops rather than stalling the render thread)
                         │

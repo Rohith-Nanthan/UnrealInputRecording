@@ -35,12 +35,9 @@ namespace
 	/**
 	 * One frame in flight between the render thread and the encoder thread.
 	 *
-	 * Pixels are stored BOTTOM-UP: Media Foundation's MFVideoFormat_RGB32 with a positive
-	 * MF_MT_DEFAULT_STRIDE means "bottom-up DIB", which is the historical Windows convention. The
-	 * alternative - declaring a negative stride so MF reads top-down - works too, but the sign
-	 * semantics are easy to get subtly wrong and produce a silently upside-down video. We already
-	 * have to copy row by row (readback buffers are padded), so walking the destination rows backwards
-	 * costs nothing and is unambiguous.
+	 * Pixels are stored top-down (row 0 = top), exactly as UMediaCapture delivers them. The H.264
+	 * encoder MFT reads MFVideoFormat_RGB32 top-down with a positive MF_MT_DEFAULT_STRIDE, so no flip
+	 * is needed; FInputRecordingVideoEncoderConfig::bFlipVertical exists only as an escape hatch.
 	 */
 	struct FEncoderFrame
 	{
@@ -167,11 +164,15 @@ public:
 		const int32 EffectiveStride = (SourceStride > 0) ? SourceStride : FrameStride;
 		uint8* Dest = Frame->Pixels.GetData();
 
-		// Vertical flip: source row 0 is the top of the image, destination row 0 is the bottom.
+		// Orientation: UMediaCapture hands us the viewport top-down (row 0 = top) and the H.264 encoder
+		// MFT consumes MFVideoFormat_RGB32 top-down too, so a straight row-for-row copy is correct. The
+		// previous build flipped here AND declared a positive stride - a double inversion that shipped the
+		// video upside down. bFlipVertical re-enables a flip only for an encoder that reads bottom-up.
 		for (int32 Row = 0; Row < SourceHeight; ++Row)
 		{
+			const int32 DestRow = Config.bFlipVertical ? (SourceHeight - 1 - Row) : Row;
 			FMemory::Memcpy(
-				Dest + static_cast<SIZE_T>(SourceHeight - 1 - Row) * FrameStride,
+				Dest + static_cast<SIZE_T>(DestRow) * FrameStride,
 				Source + static_cast<SIZE_T>(Row) * EffectiveStride,
 				FrameStride);
 		}
@@ -331,6 +332,7 @@ private:
 		// MFVideoFormat_RGB32 is B,G,R,X in memory, which is exactly PF_B8G8R8A8 - no swizzle needed.
 		InputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
 		InputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+		// Positive stride = top-down, matching how we fill the buffer (see the copy loop in SubmitFrame).
 		InputType->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(FrameStride));
 		::MFSetAttributeSize(InputType, MF_MT_FRAME_SIZE, Config.Width, Config.Height);
 		::MFSetAttributeRatio(InputType, MF_MT_FRAME_RATE, Config.FrameRate, 1);

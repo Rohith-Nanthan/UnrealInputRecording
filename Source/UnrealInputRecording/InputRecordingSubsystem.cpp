@@ -317,6 +317,7 @@ void UInputRecordingSubsystem::BindToComponent(UInputReplayComponent* Component)
 	Component->OnMatchInputMatched.AddUniqueDynamic(this, &UInputRecordingSubsystem::HandleMatchInputMatched);
 	Component->OnMatchInputMismatch.AddUniqueDynamic(this, &UInputRecordingSubsystem::HandleMatchInputMismatch);
 	Component->OnMatchInputFinished.AddUniqueDynamic(this, &UInputRecordingSubsystem::HandleMatchInputFinished);
+	Component->OnInputSyncPointRecorded.AddUniqueDynamic(this, &UInputRecordingSubsystem::HandleInputSyncPointRecorded);
 }
 
 void UInputRecordingSubsystem::UnbindFromComponent(UInputReplayComponent* Component)
@@ -335,6 +336,7 @@ void UInputRecordingSubsystem::UnbindFromComponent(UInputReplayComponent* Compon
 	Component->OnMatchInputMatched.RemoveAll(this);
 	Component->OnMatchInputMismatch.RemoveAll(this);
 	Component->OnMatchInputFinished.RemoveAll(this);
+	Component->OnInputSyncPointRecorded.RemoveAll(this);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -859,4 +861,15 @@ void UInputRecordingSubsystem::HandleMatchInputFinished(bool bCompletedAllCues)
 
 	OnMatchInputFinished.Broadcast(bCompletedAllCues);
 	BroadcastModeChanged();
+}
+
+void UInputRecordingSubsystem::HandleInputSyncPointRecorded(FName ActionName, float TimeSeconds, FVector Value)
+{
+	OnInputSyncPointRecorded.Broadcast(ActionName, TimeSeconds, Value);
+}
+
+bool UInputRecordingSubsystem::GetLiveInputSnapshot(FString& OutActionName, FVector& OutValue) const
+{
+	const UInputReplayComponent* Component = FindReplayComponent();
+	return Component && Component->GetLiveInputSnapshot(OutActionName, OutValue);
 }

@@ -61,7 +61,7 @@ struct FInputActionIconEntry
 
 /**
  * Create one at Content Browser > Miscellaneous > Data Asset > Input Action Icon Mapping, add an entry
- * per action, and assign it on UVideoMatchPlayerWidget.
+ * per action, and assign it on UMatchVideoPlayerWidget (and URecordingControllerWidget).
  */
 UCLASS(BlueprintType, meta = (DisplayName = "Input Action Icon Mapping"))
 class UNREALINPUTRECORDING_API UInputActionIconMappingDataAsset : public UDataAsset

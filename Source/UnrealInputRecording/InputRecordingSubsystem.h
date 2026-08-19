@@ -39,6 +39,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInputRecordingModeChanged, EInput
 /** A take's .mp4 finished writing. bSuccess is false when capture never started or the encoder failed. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInputRecordingVideoSaved, bool, bSuccess, const FString&, VideoPath);
 
+/** Relayed from the component: an action crossed its onset threshold while recording. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInputRecordingSyncPoint, FName, ActionName, float, TimeSeconds, FVector, Value);
+
 UCLASS()
 class UNREALINPUTRECORDING_API UInputRecordingSubsystem : public UGameInstanceSubsystem
 {
@@ -234,6 +237,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Input Recording|Match Input")
 	FString GetLastMismatchDescription() const { return LastMismatchDescription; }
 
+	/** The action currently pressed hardest while recording, for the controller UI's current-input area. */
+	UFUNCTION(BlueprintPure, Category = "Input Recording|Recording")
+	bool GetLiveInputSnapshot(FString& OutActionName, FVector& OutValue) const;
+
 	/** One-line human-readable state, ready to drop into a status label. */
 	UFUNCTION(BlueprintPure, Category = "Input Recording")
 	FString GetStatusText() const;
@@ -274,6 +281,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
 	FOnInputRecordingVideoSaved OnVideoSaved;
+
+	/** Fired for every sync point captured while recording. The controller UI appends a history row. */
+	UPROPERTY(BlueprintAssignable, Category = "Input Recording|Events")
+	FOnInputRecordingSyncPoint OnInputSyncPointRecorded;
 
 	// -----------------------------------------------------------------------------------------
 	// Session state
@@ -324,6 +335,7 @@ private:
 	UFUNCTION() void HandleMatchInputMatched(int32 CueIndex, int32 TotalCues);
 	UFUNCTION() void HandleMatchInputMismatch(const FString& ExpectedInput, const FString& ActualInput);
 	UFUNCTION() void HandleMatchInputFinished(bool bCompletedAllCues);
+	UFUNCTION() void HandleInputSyncPointRecorded(FName ActionName, float TimeSeconds, FVector Value);
 
 	//~ State -----------------------------------------------------------------------------------
 
