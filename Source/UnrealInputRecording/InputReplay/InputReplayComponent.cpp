@@ -37,6 +37,8 @@ void UInputReplayComponent::BeginPlay()
 {
 	Super::BeginPlay();
 	BuildActionRegistry();
+	
+	UE_LOG(LogInputReplay, Log, TEXT("Input Replay Component '%s' created."), *GetName());
 }
 
 void UInputReplayComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
