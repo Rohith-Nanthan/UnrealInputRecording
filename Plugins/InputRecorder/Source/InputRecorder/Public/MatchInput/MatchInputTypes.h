@@ -79,15 +79,22 @@ struct INPUTRECORDER_API FMatchInputCueBuildOptions
 	bool bIgnoreFrameDeltaActions = true;
 
 	/**
-	 * Full path or bare name. Defaults exclude look and camera actions - camera movement must
-	 * never count as a wrong answer.
+	 * Full path, bare name, or a wildcard pattern using * and ?. An entry with no wildcard is
+	 * still compared exactly, so an existing configuration behaves as it always did.
+	 *
+	 * The defaults exclude look and camera actions, because camera movement must never count as
+	 * a wrong answer. They are patterns rather than literal asset names on purpose: a default of
+	 * "IA_Look" only works in a project that happens to use that exact name, and every project
+	 * spells it differently - IA_Look, IA_Look_Mouse, IA_MouseLook, IA_CameraTurn. Matching the
+	 * naming convention rather than one project's spelling is what lets this drop into an
+	 * unknown project and still behave.
 	 */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Match Input")
 	TArray<FString> IgnoredActions;
 
 	FMatchInputCueBuildOptions()
 	{
-		IgnoredActions.Add(TEXT("IA_Look"));
-		IgnoredActions.Add(TEXT("IA_MouseLook"));
+		IgnoredActions.Add(TEXT("*Look*"));
+		IgnoredActions.Add(TEXT("*Camera*"));
 	}
 };

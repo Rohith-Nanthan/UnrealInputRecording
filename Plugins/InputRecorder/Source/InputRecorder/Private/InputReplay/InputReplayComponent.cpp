@@ -16,6 +16,7 @@
 #include "MatchInput/MatchInputCueBuilder.h"
 #include "Misc/EngineVersion.h"
 #include "Subsystem/InputRecordingSubsystem.h"
+#include "UObject/UObjectIterator.h"
 
 namespace InputReplayComponentPrivate
 {
@@ -156,11 +157,20 @@ bool UInputReplayComponent::BuildTrackedActionList()
 	TrackedActions.Reset();
 	FrameDeltaTrackedIndices.Reset();
 	IgnoredTrackedIndices.Reset();
+	SourceMappingContextPaths.Reset();
+	SourceMappingContextPriorities.Reset();
 
 	TSet<const UInputAction*> Candidates;
 
+	// Recorded alongside the actions, because the actions alone are not enough to review a take.
+	// A cue names an action, but judging the answer needs that action reachable from a key, and
+	// only the context provides that. See WriteHeaderMappingContexts.
+	TMap<const UInputMappingContext*, int32> SourceContexts;
+
 	if (RecordedMappingContexts.Num() > 0)
 	{
+		UEnhancedInputLocalPlayerSubsystem* InputSubsystem = ResolveEnhancedInputSubsystem();
+
 		for (const TSoftObjectPtr<UInputMappingContext>& SoftContext : RecordedMappingContexts)
 		{
 			const UInputMappingContext* Context = SoftContext.LoadSynchronous();
@@ -170,6 +180,16 @@ bool UInputReplayComponent::BuildTrackedActionList()
 					*SoftContext.ToString());
 				continue;
 			}
+
+			// The configured list says which contexts to record, never at what priority - that is
+			// the running game's business. Ask the live stack, and fall back to 0 for a context
+			// that is configured but not currently applied.
+			int32 AppliedPriority = 0;
+			if (InputSubsystem)
+			{
+				InputSubsystem->HasMappingContext(Context, AppliedPriority);
+			}
+			SourceContexts.Add(Context, AppliedPriority);
 
 			for (const FEnhancedActionKeyMapping& Mapping : Context->GetMappings())
 			{
@@ -204,6 +224,25 @@ bool UInputReplayComponent::BuildTrackedActionList()
 				if (Mapping.Action)
 				{
 					Candidates.Add(Mapping.Action);
+				}
+			}
+		}
+
+		// Which contexts produced those mappings. GetEnhancedActionMappingsView is flattened - a
+		// mapping does not remember the context it came from - and UEnhancedPlayerInput keeps its
+		// applied set protected, so the public route is to ask the subsystem about each mapping
+		// context that is loaded. A context cannot be applied without being loaded, which makes
+		// the loaded set a superset of the answer, and there are only ever a handful of them.
+		if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem = ResolveEnhancedInputSubsystem())
+		{
+			for (TObjectIterator<UInputMappingContext> It; It; ++It)
+			{
+				UInputMappingContext* Context = *It;
+				int32 AppliedPriority = 0;
+
+				if (IsValid(Context) && InputSubsystem->HasMappingContext(Context, AppliedPriority))
+				{
+					SourceContexts.Add(Context, AppliedPriority);
 				}
 			}
 		}
@@ -275,10 +314,38 @@ bool UInputReplayComponent::BuildTrackedActionList()
 			ExcludedByWhitelist);
 	}
 
+	// Flattened and sorted here rather than at write time. Two runs of the same setup have to
+	// produce the same bytes, and a TMap iterates in an order that is stable within one run and
+	// meaningless across them.
+	{
+		TArray<TPair<FString, int32>> OrderedContexts;
+		OrderedContexts.Reserve(SourceContexts.Num());
+
+		for (const TPair<const UInputMappingContext*, int32>& Pair : SourceContexts)
+		{
+			if (Pair.Key)
+			{
+				OrderedContexts.Emplace(Pair.Key->GetPathName(), Pair.Value);
+			}
+		}
+
+		OrderedContexts.Sort([](const TPair<FString, int32>& A, const TPair<FString, int32>& B)
+		{
+			return A.Key < B.Key;
+		});
+
+		for (const TPair<FString, int32>& Pair : OrderedContexts)
+		{
+			SourceMappingContextPaths.Add(Pair.Key);
+			SourceMappingContextPriorities.Add(Pair.Value);
+		}
+	}
+
 	ResetTrackingState();
 
-	UE_LOG(LogInputRecording, Verbose, TEXT("Tracking %d action(s), %d of them frame-delta, %d ignored for matching."),
-		TrackedActions.Num(), FrameDeltaTrackedIndices.Num(), IgnoredTrackedIndices.Num());
+	UE_LOG(LogInputRecording, Verbose,
+		TEXT("Tracking %d action(s) from %d mapping context(s), %d of them frame-delta, %d ignored for matching."),
+		TrackedActions.Num(), SourceMappingContextPaths.Num(), FrameDeltaTrackedIndices.Num(), IgnoredTrackedIndices.Num());
 
 	return TrackedActions.Num() > 0;
 }
@@ -297,6 +364,26 @@ void UInputReplayComponent::WriteHeaderActionPaths()
 			CurrentRecording.Header.FrameDeltaActionIndices.Add(Index);
 		}
 	}
+}
+
+void UInputReplayComponent::WriteHeaderMappingContexts()
+{
+	CurrentRecording.Header.MappingContextPaths = SourceMappingContextPaths;
+	CurrentRecording.Header.MappingContextPriorities = SourceMappingContextPriorities;
+
+	if (SourceMappingContextPaths.Num() > 0)
+	{
+		return;
+	}
+
+	// Worth a warning rather than silence. The take itself will be fine - actions were found, or
+	// BuildTrackedActionList would already have failed - but it is being written without the one
+	// piece of information the review map needs to put the input stack back, and that only shows
+	// up later as a quiz where no cue can ever be answered.
+	UE_LOG(LogInputRecording, Warning,
+		TEXT("This take records no mapping contexts, so reviewing it will fall back to the Recorded Mapping ")
+		TEXT("Contexts project setting. If that setting is also empty, the review map will have nothing mapped ")
+		TEXT("and no cue will be answerable."));
 }
 
 void UInputReplayComponent::ResetTrackingState()
@@ -426,6 +513,7 @@ bool UInputReplayComponent::StartRecording(const FString& DisplayName)
 	CurrentRecording.Header.LogicalTicksPerSecond = FMath::Max(1, LogicalTicksPerSecond);
 	CurrentRecording.Header.RandomSeed = FMath::Rand();
 	WriteHeaderActionPaths();
+	WriteHeaderMappingContexts();
 
 	RecordingFrameIndex = 0;
 	RecordingTimeSeconds = 0.0f;

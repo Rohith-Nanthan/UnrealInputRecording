@@ -10,6 +10,42 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 
+const FGuid GInputRecordingGhostVersionGuid(0x9F2C1A44, 0x5E7B4D18, 0xA3F60C29, 0x1B84D7E5);
+
+namespace InputRecordingSerializerPrivate
+{
+	const TCHAR* CustomVersionFriendlyName = TEXT("InputRecorderGhost");
+
+	/**
+	 * Reads and validates the magic-and-version preamble, then publishes the file version onto
+	 * the archive so the nested struct operators can branch on it.
+	 */
+	bool ReadGhostPreamble(FArchive& Ar, const FString& GhostPath)
+	{
+		uint32 Magic = 0;
+		uint32 Version = 0;
+		Ar << Magic;
+		Ar << Version;
+
+		if (Magic != GInputRecordingGhostMagic)
+		{
+			UE_LOG(LogInputRecording, Error, TEXT("%s is not a ghost file (magic 0x%08X)."), *GhostPath, Magic);
+			return false;
+		}
+
+		if (Version > GInputRecordingGhostVersion)
+		{
+			UE_LOG(LogInputRecording, Error,
+				TEXT("%s was written by a newer build (file version %u, this build reads up to %u). Refusing to load."),
+				*GhostPath, Version, GInputRecordingGhostVersion);
+			return false;
+		}
+
+		Ar.SetCustomVersion(GInputRecordingGhostVersionGuid, static_cast<int32>(Version), CustomVersionFriendlyName);
+		return true;
+	}
+}
+
 FArchive& operator<<(FArchive& Ar, FRecordedInputSample& Sample)
 {
 	Ar << Sample.ActionName;
@@ -50,6 +86,16 @@ FArchive& operator<<(FArchive& Ar, FInputRecordingHeader& Header)
 	Ar << Header.RandomSeed;
 	Ar << Header.ActionPaths;
 	Ar << Header.FrameDeltaActionIndices;
+
+	// A v1 file has no context block at all. Leaving the arrays empty is the correct outcome
+	// rather than a degraded one: the review map treats empty as "this take does not know", and
+	// falls back to the project settings exactly as it did before v2 existed.
+	if (Ar.CustomVer(GInputRecordingGhostVersionGuid) >= static_cast<int32>(InputRecordingGhostVersions::MappingContexts))
+	{
+		Ar << Header.MappingContextPaths;
+		Ar << Header.MappingContextPriorities;
+	}
+
 	return Ar;
 }
 
@@ -87,6 +133,10 @@ bool UInputRecordingSerializer::SaveRecording(const FInputRecording& Recording, 
 		uint32 Version = GInputRecordingGhostVersion;
 		Writer << Magic;
 		Writer << Version;
+
+		// Same channel the loader uses, so the write path and the read path branch on one value.
+		Writer.SetCustomVersion(GInputRecordingGhostVersionGuid, static_cast<int32>(Version),
+			InputRecordingSerializerPrivate::CustomVersionFriendlyName);
 
 		// const_cast is safe here: the archive is write-only, so nothing is mutated.
 		FInputRecording& MutableRecording = const_cast<FInputRecording&>(Recording);
@@ -127,22 +177,8 @@ bool UInputRecordingSerializer::LoadRecording(const FString& AbsoluteBasePath, F
 
 	FMemoryReader Reader(Bytes, /*bIsPersistent=*/true);
 
-	uint32 Magic = 0;
-	uint32 Version = 0;
-	Reader << Magic;
-	Reader << Version;
-
-	if (Magic != GInputRecordingGhostMagic)
+	if (!InputRecordingSerializerPrivate::ReadGhostPreamble(Reader, GhostPath))
 	{
-		UE_LOG(LogInputRecording, Error, TEXT("%s is not a ghost file (magic 0x%08X)."), *GhostPath, Magic);
-		return false;
-	}
-
-	if (Version > GInputRecordingGhostVersion)
-	{
-		UE_LOG(LogInputRecording, Error,
-			TEXT("%s was written by a newer build (file version %u, this build reads up to %u). Refusing to load."),
-			*GhostPath, Version, GInputRecordingGhostVersion);
 		return false;
 	}
 
@@ -158,6 +194,40 @@ bool UInputRecordingSerializer::LoadRecording(const FString& AbsoluteBasePath, F
 	UE_LOG(LogInputRecording, Log, TEXT("Loaded recording %s (%d samples, %d actions, %.2fs)."),
 		*OutRecording.Header.DisplayName, OutRecording.Samples.Num(),
 		OutRecording.Header.ActionPaths.Num(), OutRecording.GetDurationSeconds());
+
+	return true;
+}
+
+bool UInputRecordingSerializer::LoadRecordingHeader(const FString& AbsoluteBasePath, FInputRecordingHeader& OutHeader)
+{
+	OutHeader = FInputRecordingHeader();
+
+	const FString GhostPath = GetGhostPath(AbsoluteBasePath);
+
+	TArray<uint8> Bytes;
+	if (!FFileHelper::LoadFileToArray(Bytes, *GhostPath))
+	{
+		UE_LOG(LogInputRecording, Warning, TEXT("No ghost file at %s."), *GhostPath);
+		return false;
+	}
+
+	FMemoryReader Reader(Bytes, /*bIsPersistent=*/true);
+
+	if (!InputRecordingSerializerPrivate::ReadGhostPreamble(Reader, GhostPath))
+	{
+		return false;
+	}
+
+	// The header is the first thing in the stream, so reading it and stopping is simply
+	// declining to read the rest - no seeking and no separate layout to keep in step.
+	Reader << OutHeader;
+
+	if (Reader.IsError())
+	{
+		UE_LOG(LogInputRecording, Error, TEXT("Ghost file %s has an unreadable header."), *GhostPath);
+		OutHeader = FInputRecordingHeader();
+		return false;
+	}
 
 	return true;
 }

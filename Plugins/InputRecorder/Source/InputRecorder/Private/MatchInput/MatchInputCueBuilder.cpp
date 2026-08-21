@@ -114,6 +114,20 @@ bool UMatchInputCueBuilder::IsActionIgnored(const FString& ActionPathOrName, con
 			continue;
 		}
 
+		// A pattern is matched against both spellings; a literal entry is compared against both
+		// spellings exactly. Wildcards are opt-in per entry rather than a mode, so a list can
+		// mix "IA_Jump" and "*Look*" and each behaves the way it reads.
+		if (Ignored.Contains(TEXT("*")) || Ignored.Contains(TEXT("?")))
+		{
+			if (ActionPathOrName.MatchesWildcard(Ignored, ESearchCase::IgnoreCase) ||
+				ShortName.MatchesWildcard(Ignored, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+
+			continue;
+		}
+
 		// Accept either spelling so a designer can paste a full path or type the asset name.
 		if (Ignored.Equals(ActionPathOrName, ESearchCase::IgnoreCase) ||
 			ToShortName(Ignored).Equals(ShortName, ESearchCase::IgnoreCase))

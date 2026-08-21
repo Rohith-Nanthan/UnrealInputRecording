@@ -37,6 +37,17 @@ struct FRecordingBootFlags
 	/** What the map override actually did, for the log and for DescribeBootFlags. */
 	FString ResolvedMapPath;
 	bool bRewroteDefaultMap = false;
+
+	/**
+	 * GameDefaultMap as it was before the override rewrote it - where this build would have
+	 * booted without -IR.
+	 *
+	 * Captured because leaving the review map has to go somewhere, and the engine default is no
+	 * longer a usable answer once the override has pointed it at the review map: asking for it
+	 * there sends the player straight back into the level they are trying to leave, forever.
+	 * Empty when nothing was rewritten, which is the signal to use the engine default as normal.
+	 */
+	FString OriginalDefaultMap;
 };
 
 namespace RecordingBootFlags

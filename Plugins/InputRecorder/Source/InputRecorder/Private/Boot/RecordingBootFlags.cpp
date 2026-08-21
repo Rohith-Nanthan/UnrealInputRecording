@@ -7,16 +7,12 @@
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Parse.h"
+#include "Settings/InputRecordingSettings.h"
 
 namespace RecordingBootFlagsPrivate
 {
 	FRecordingBootFlags GBootFlags;
 	bool bInitialized = false;
-
-	/** Fallback when the settings section has not been written to DefaultGame.ini yet. */
-	const TCHAR* DefaultControlRecapMap = TEXT("/Game/RecordingFolder/Maps/ControlRecapLevel.ControlRecapLevel");
-
-	const TCHAR* SettingsSection = TEXT("/Script/InputRecorder.InputRecordingSettings");
 
 	FString StripQuotes(const FString& In)
 	{
@@ -42,16 +38,19 @@ namespace RecordingBootFlagsPrivate
 	{
 		FString MapPath;
 
-		if (GConfig && GConfig->GetString(SettingsSection, TEXT("ControlRecapMap"), MapPath, GGameIni))
+		if (GConfig && GConfig->GetString(InputRecorderDefaults::SettingsSection, TEXT("ControlRecapMap"), MapPath, GGameIni))
 		{
 			// FSoftObjectPath serialises to config wrapped in its own struct syntax on some
 			// paths; strip anything that is obviously not a path.
 			MapPath = StripQuotes(MapPath);
 		}
 
+		// No entry in the host project's DefaultGame.ini is the normal case for a project that
+		// has just had this plugin dropped into it, not an error - so the fallback has to be the
+		// map the plugin itself ships. It is the same string the settings CDO defaults to.
 		if (MapPath.IsEmpty())
 		{
-			MapPath = DefaultControlRecapMap;
+			MapPath = InputRecorderDefaults::ControlRecapMapPath;
 		}
 
 		return MapPath;
@@ -212,6 +211,10 @@ void RecordingBootFlags::InitializeFromCommandLine()
 	// all. The obvious implementation (boot, then OpenLevel) loads the gameplay map first: its
 	// actors spawn, its game mode runs, and the player sees a frame or two of a level they did
 	// not ask for.
+	// Captured before the overwrite, not after - this is the only moment the original value
+	// still exists anywhere.
+	GBootFlags.OriginalDefaultMap = UGameMapsSettings::GetGameDefaultMap();
+
 	UGameMapsSettings::SetGameDefaultMap(GBootFlags.ResolvedMapPath);
 	GBootFlags.bRewroteDefaultMap = true;
 

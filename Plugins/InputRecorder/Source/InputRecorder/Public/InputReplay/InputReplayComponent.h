@@ -251,6 +251,12 @@ private:
 	/** Copies the tracked list into the header. Only a take needs this; MatchInput does not. */
 	void WriteHeaderActionPaths();
 
+	/**
+	 * Copies the mapping contexts the tracked list was built from into the header, so the review
+	 * map can rebuild this exact input stack in a level that shares none of it.
+	 */
+	void WriteHeaderMappingContexts();
+
 	/** Tracked index whose action matches this cue, by soft path first and short name second. */
 	int32 ResolveCueTrackedIndex(const FMatchInputCue& Cue) const;
 
@@ -291,6 +297,14 @@ private:
 
 	/** Tracked indices excluded by CueBuildOptions.IgnoredActions - camera and look, by default. */
 	TSet<int32> IgnoredTrackedIndices;
+
+	/**
+	 * The mapping contexts BuildTrackedActionList actually drew from, with the priority each was
+	 * applied at in the parallel array. Sorted, so two runs of the same setup produce the same
+	 * bytes and a .ghost.json stays diffable.
+	 */
+	TArray<FString> SourceMappingContextPaths;
+	TArray<int32> SourceMappingContextPriorities;
 
 	/** Last written value per tracked action - the whole of the delta compression state. */
 	TArray<FVector> LastRecordedValues;

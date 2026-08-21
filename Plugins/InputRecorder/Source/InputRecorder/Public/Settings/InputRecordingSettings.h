@@ -15,6 +15,22 @@ class UInputMappingContext;
 class UInputReplayComponent;
 class URecordingUIInputConfig;
 
+namespace InputRecorderDefaults
+{
+	/**
+	 * The review map this plugin ships, as one string in one place.
+	 *
+	 * Shared deliberately. The settings CDO and the boot-time map override each used to carry
+	 * their own copy of this path, and they drifted: the content moved into the plugin, the CDO
+	 * was updated, the boot copy was not, and -IR=1 in any project without an explicit
+	 * ControlRecapMap in its DefaultGame.ini booted into a map that no longer existed.
+	 */
+	inline const TCHAR* ControlRecapMapPath = TEXT("/InputRecorder/Maps/ControlRecapLevel.ControlRecapLevel");
+
+	/** Config section backing UInputRecordingSettings, for code that must read it before the CDO exists. */
+	inline const TCHAR* SettingsSection = TEXT("/Script/InputRecorder.InputRecordingSettings");
+}
+
 /**
  * Everything a designer might tune, in one place and nowhere else.
  *

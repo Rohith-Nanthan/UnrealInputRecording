@@ -53,7 +53,16 @@ protected:
 	bool ResolveSessionToReview(FRecordingSessionInfo& OutSession) const;
 
 	void SetUpReviewInputMode();
-	void PushGameplayMappingContexts();
+
+	/**
+	 * Rebuilds the input stack this level has to listen to.
+	 *
+	 * @param Session the take about to be reviewed, or null when none resolved. Its header names
+	 *        the contexts that were applied when the input was captured, which is the only source
+	 *        that is right in a project the plugin has never been configured for. Project
+	 *        settings are the fallback, for a take recorded before headers carried this.
+	 */
+	void PushGameplayMappingContexts(const FRecordingSessionInfo* Session);
 
 private:
 	UFUNCTION()

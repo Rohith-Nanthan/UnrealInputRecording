@@ -35,7 +35,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Match Input")
 	static FString FormatInputDescription(const FString& ActionName, uint8 ValueType, const FVector& Value);
 
-	/** True when this action name appears in the ignore list, by bare name or by full path. */
+	/**
+	 * True when this action appears in the list, compared by bare name or by full path.
+	 *
+	 * An entry containing * or ? is treated as a wildcard pattern; anything else is compared
+	 * exactly. Also used inversely as the whitelist membership test, so a whitelist gets
+	 * wildcards on the same terms.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Match Input")
 	static bool IsActionIgnored(const FString& ActionPathOrName, const TArray<FString>& IgnoredActions);
 

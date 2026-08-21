@@ -138,6 +138,33 @@ struct INPUTRECORDER_API FInputRecordingHeader
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Input Recording")
 	TArray<int32> FrameDeltaActionIndices;
 
+	/**
+	 * Every Enhanced Input mapping context that was applied to the player when this take was
+	 * recorded, as soft object paths.
+	 *
+	 * This is what makes a take reviewable in a project that was never told anything about it.
+	 * Review happens in a different level with a different input setup, so before MatchInput can
+	 * judge a single answer the player's input stack has to be put back the way it was - and the
+	 * recording is the only thing that knows what that was. Reading it from project settings
+	 * instead only works while the settings happen to name the right contexts, which is never
+	 * true in a project that has just had this plugin dropped into it: nothing is mapped, every
+	 * cue is unanswerable, and the quiz hangs on the first one.
+	 *
+	 * Empty in a v1 file, and empty is handled - the review map falls back to project settings.
+	 */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Input Recording")
+	TArray<FString> MappingContextPaths;
+
+	/**
+	 * Parallel to MappingContextPaths - the priority each context was applied at.
+	 *
+	 * Restoring the priorities matters as much as restoring the contexts. Priority is what
+	 * decides which context wins when two of them map the same key, so flattening everything to
+	 * zero can resolve a key to a different action than the one the take recorded.
+	 */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Input Recording")
+	TArray<int32> MappingContextPriorities;
+
 	/** Short asset name for an index, or an empty string when the index is out of range. */
 	FString GetActionShortName(int32 ActionIndex) const;
 };

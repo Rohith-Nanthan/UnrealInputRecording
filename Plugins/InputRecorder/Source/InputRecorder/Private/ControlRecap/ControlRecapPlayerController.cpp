@@ -13,6 +13,7 @@
 #include "GameMapsSettings.h"
 #include "InputMappingContext.h"
 #include "InputRecordingLog.h"
+#include "InputReplay/InputRecordingSerializer.h"
 #include "Kismet/GameplayStatics.h"
 #include "Settings/InputRecordingSettings.h"
 #include "Settings/RecordingUIInputConfig.h"
@@ -59,7 +60,7 @@ void AControlRecapPlayerController::BeginPlay()
 
 	// Input first, so the mapping contexts are live before MatchInput starts listening.
 	SetUpReviewInputMode();
-	PushGameplayMappingContexts();
+	PushGameplayMappingContexts(bFound ? &Session : nullptr);
 
 	if (bFound)
 	{
@@ -138,7 +139,7 @@ void AControlRecapPlayerController::SetUpReviewInputMode()
 	}
 }
 
-void AControlRecapPlayerController::PushGameplayMappingContexts()
+void AControlRecapPlayerController::PushGameplayMappingContexts(const FRecordingSessionInfo* Session)
 {
 	const ULocalPlayer* LocalPlayer = GetLocalPlayer();
 	UEnhancedInputLocalPlayerSubsystem* InputSubsystem = LocalPlayer ? LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr;
@@ -148,39 +149,108 @@ void AControlRecapPlayerController::PushGameplayMappingContexts()
 	}
 
 	const UInputRecordingSettings* Settings = UInputRecordingSettings::Get();
-	if (!Settings)
-	{
-		return;
-	}
 
 	// Every recorded action has to be live and observable in this level. A player pressing
 	// something wrong must produce a real, named Enhanced Input event, or there is nothing to
 	// report back to them.
 	int32 PushedContexts = 0;
-	for (const TSoftObjectPtr<UInputMappingContext>& SoftContext : Settings->RecordedMappingContexts)
+
+	// The take's own record comes first, because it is the only source that is correct in a
+	// project nobody has configured this plugin for: it names the contexts that were applied when
+	// the input was captured, at the priorities they were applied at.
+	FInputRecordingHeader Header;
+	TArray<TSoftObjectPtr<UInputMappingContext>> RestoredContexts;
+
+	if (Session && Session->IsPlayable() &&
+		UInputRecordingSerializer::LoadRecordingHeader(Session->GetBasePath(), Header))
 	{
-		if (const UInputMappingContext* Context = SoftContext.LoadSynchronous())
+		for (int32 Index = 0; Index < Header.MappingContextPaths.Num(); ++Index)
 		{
-			InputSubsystem->AddMappingContext(Context, 0);
+			const TSoftObjectPtr<UInputMappingContext> SoftContext{ FSoftObjectPath(Header.MappingContextPaths[Index]) };
+			const UInputMappingContext* Context = SoftContext.LoadSynchronous();
+
+			if (!Context)
+			{
+				// Renamed or deleted since the take. Not fatal by itself - the settings fallback
+				// still runs if nothing at all could be restored - but the cues that needed this
+				// context will have no key to arrive on.
+				UE_LOG(LogMatchInput, Warning,
+					TEXT("Mapping context %s was recorded with this take but will not load; any cue needing it is unanswerable."),
+					*Header.MappingContextPaths[Index]);
+				continue;
+			}
+
+			// Priority decides which context wins a key that two of them map, so restoring it is
+			// part of restoring the stack, not a detail.
+			const int32 Priority = Header.MappingContextPriorities.IsValidIndex(Index)
+				? Header.MappingContextPriorities[Index]
+				: 0;
+
+			InputSubsystem->AddMappingContext(Context, Priority);
+			RestoredContexts.Add(SoftContext);
 			++PushedContexts;
+		}
+
+		if (PushedContexts > 0)
+		{
+			UE_LOG(LogMatchInput, Log, TEXT("Restored %d mapping context(s) recorded with %s."),
+				PushedContexts, *Session->FolderName);
+
+			// Narrow what the component watches to exactly what the take watched.
+			//
+			// Without this the component falls back to "record whatever is applied", which in
+			// this level also means the recorder's own UI context - so pressing Accept to get
+			// past a cue would register as a wrong answer against the take. Handing it the
+			// recorded list keeps the review judging the same actions the take captured, and
+			// nothing else.
+			if (UInputReplayComponent* Component = ReplayComponent.Get())
+			{
+				Component->RecordedMappingContexts = RestoredContexts;
+			}
+		}
+	}
+
+	// Fallback: a take written before headers carried contexts, or one whose contexts have all
+	// gone missing.
+	if (PushedContexts == 0 && Settings)
+	{
+		for (const TSoftObjectPtr<UInputMappingContext>& SoftContext : Settings->RecordedMappingContexts)
+		{
+			if (const UInputMappingContext* Context = SoftContext.LoadSynchronous())
+			{
+				InputSubsystem->AddMappingContext(Context, 0);
+				++PushedContexts;
+			}
 		}
 	}
 
 	if (PushedContexts == 0)
 	{
 		UE_LOG(LogMatchInput, Warning,
-			TEXT("No gameplay mapping contexts are configured, so the review map has nothing to listen to. ")
-			TEXT("Set Recorded Mapping Contexts in Project Settings > Game > Input Recorder."));
+			TEXT("Nothing is mapped in the review map, so no cue can be answered. This take carries no mapping ")
+			TEXT("contexts of its own and Recorded Mapping Contexts is empty in Project Settings > Game > Input ")
+			TEXT("Recorder. Re-record the take with this build, or name the contexts in that setting."));
 	}
 
 	// The UI verbs sit above gameplay so Accept and Back win over a gameplay binding on the same key.
-	if (const URecordingUIInputConfig* UIConfig = Settings->UIInputConfig.LoadSynchronous())
+	if (Settings)
 	{
-		if (const UInputMappingContext* UIContext = UIConfig->UIMappingContext.LoadSynchronous())
+		if (const URecordingUIInputConfig* UIConfig = Settings->UIInputConfig.LoadSynchronous())
 		{
-			InputSubsystem->AddMappingContext(UIContext, UIConfig->PushPriority);
+			if (const UInputMappingContext* UIContext = UIConfig->UIMappingContext.LoadSynchronous())
+			{
+				InputSubsystem->AddMappingContext(UIContext, UIConfig->PushPriority);
+			}
 		}
 	}
+
+	// AddMappingContext only flags a rebuild; nothing is actually mapped until the input subsystem
+	// next ticks. MatchInput starts later in this same frame and reads action values immediately,
+	// so without forcing the rebuild the first cue is judged against an empty stack - the same
+	// deferred-rebuild trap that made the first ir.record.start of a session look like it failed.
+	FModifyContextOptions Options;
+	Options.bForceImmediately = true;
+	InputSubsystem->RequestRebuildControlMappings(Options);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -272,6 +342,13 @@ void AControlRecapPlayerController::LeaveRecap()
 
 	if (Destination.IsEmpty())
 	{
+		// Where this build would have booted without -IR. Checked before the engine default,
+		// because when the boot override is in play the engine default IS this level.
+		Destination = RecordingBootFlags::Get().OriginalDefaultMap;
+	}
+
+	if (Destination.IsEmpty())
+	{
 		// Never leave a dead end with nowhere to go.
 		Destination = UGameMapsSettings::GetGameDefaultMap();
 	}
@@ -280,6 +357,22 @@ void AControlRecapPlayerController::LeaveRecap()
 	{
 		UE_LOG(LogMatchInput, Error, TEXT("Nowhere to travel to on leaving the review map; staying put."));
 		return;
+	}
+
+	// Last line of defence, and it earns its place: every candidate above can resolve to this
+	// same level, and travelling to it does not fail - it reloads, finishes, and leaves again,
+	// several times a second, forever. Staying put with an error that names the setting to fix
+	// is a far better failure than a loop nobody can escape.
+	if (const UInputRecordingSettings* Settings = UInputRecordingSettings::Get())
+	{
+		if (Settings->ControlRecapMap.IsValid() && Destination == Settings->ControlRecapMap.GetLongPackageName())
+		{
+			UE_LOG(LogMatchInput, Error,
+				TEXT("Leaving the review map would travel straight back into it, so staying put. Set Gameplay Map ")
+				TEXT("in Project Settings > Game > Input Recorder, or Target On Cancel Map on the review map's game ")
+				TEXT("mode, to name where a review should return to."));
+			return;
+		}
 	}
 
 	UE_LOG(LogMatchInput, Log, TEXT("Leaving the review map for %s."), *Destination);

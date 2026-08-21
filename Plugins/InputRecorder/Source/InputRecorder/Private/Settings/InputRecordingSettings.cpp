@@ -17,7 +17,7 @@ UInputRecordingSettings::UInputRecordingSettings()
 	// Leaving the widget classes empty instead would technically "work" - the code falls back to
 	// the raw C++ classes - but those build no widget tree, so the user gets blank surfaces and
 	// an error in the log. Empty is not a usable default for a drag-and-drop plugin.
-	ControlRecapMap = FSoftObjectPath(TEXT("/InputRecorder/Maps/ControlRecapLevel.ControlRecapLevel"));
+	ControlRecapMap = FSoftObjectPath(InputRecorderDefaults::ControlRecapMapPath);
 
 	UIInputConfig = TSoftObjectPtr<URecordingUIInputConfig>(
 		FSoftObjectPath(TEXT("/InputRecorder/DataAssets/DA_RecordingUIInput.DA_RecordingUIInput")));

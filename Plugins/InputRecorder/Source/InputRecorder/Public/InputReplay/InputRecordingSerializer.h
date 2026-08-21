@@ -10,8 +10,27 @@
 /** Binary .ghost file magic - 'GHST' little-endian. */
 inline constexpr uint32 GInputRecordingGhostMagic = 0x54534847u;
 
+/** Every layout this build understands. Loading refuses anything newer than the last one. */
+namespace InputRecordingGhostVersions
+{
+	inline constexpr uint32 Initial = 1u;
+
+	/** Header gained MappingContextPaths and MappingContextPriorities. */
+	inline constexpr uint32 MappingContexts = 2u;
+}
+
 /** Bump when the on-disk layout changes. Loading refuses anything newer than this. */
-inline constexpr uint32 GInputRecordingGhostVersion = 1u;
+inline constexpr uint32 GInputRecordingGhostVersion = InputRecordingGhostVersions::MappingContexts;
+
+/**
+ * Carries the file version into the nested operator<< calls.
+ *
+ * The file's own magic-and-version preamble stays the source of truth; this is never written
+ * into the file. It exists because a struct's operator<< has no other way to learn which layout
+ * it is reading, and threading a version argument through every one of them would change three
+ * signatures to solve it in one place.
+ */
+INPUTRECORDER_API extern const FGuid GInputRecordingGhostVersionGuid;
 
 INPUTRECORDER_API FArchive& operator<<(FArchive& Ar, FRecordedInputSample& Sample);
 INPUTRECORDER_API FArchive& operator<<(FArchive& Ar, FInputRecordingHeader& Header);
@@ -43,6 +62,16 @@ public:
 	/** Reads the binary .ghost. The JSON copy is never read back - see SaveRecordingAsJson. */
 	UFUNCTION(BlueprintCallable, Category = "Input Recording|Serialization")
 	static bool LoadRecording(const FString& AbsoluteBasePath, FInputRecording& OutRecording);
+
+	/**
+	 * Reads the header block and stops.
+	 *
+	 * The review map has to restore the take's mapping contexts before MatchInput starts
+	 * listening, which is well before it wants the samples - and on a long take the samples are
+	 * the overwhelming majority of the file.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input Recording|Serialization")
+	static bool LoadRecordingHeader(const FString& AbsoluteBasePath, FInputRecordingHeader& OutHeader);
 
 	/**
 	 * Human-readable copy, for reading and diffing only.
