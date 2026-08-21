@@ -1,53 +1,66 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class InputRecorder : ModuleRules
 {
 	public InputRecorder(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		
-		PublicIncludePaths.AddRange(
-			new string[] {
-				// ... add public include paths required here ...
-			}
-			);
-				
-		
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// ... add other private include paths required here ...
-			}
-			);
-			
-		
-		PublicDependencyModuleNames.AddRange(
-			new string[]
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+		// UBT adds these two by convention, but they are named explicitly because every include
+		// in this module is module-root-relative ("InputReplay/InputReplayTypes.h" rather than
+		// a sibling-relative path). That only resolves while the module roots are on the include
+		// path, so the requirement is worth stating rather than inheriting silently.
+		PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "Public"));
+		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "Private"));
+
+		PublicDependencyModuleNames.AddRange(new string[]
+		{
+			"Core",
+			"CoreUObject",
+			"Engine",
+			"InputCore",
+			// Public rather than private: UInputReplayComponent's header exposes
+			// TSoftObjectPtr<UInputMappingContext> and UInputAction to anything including it.
+			"EnhancedInput",
+			"UMG",
+			"Slate",
+			"SlateCore",
+			"DeveloperSettings",
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			// UGameMapsSettings lives in EngineSettings. A monolithic game target links it in
+			// anyway; the modular editor DLL does not, so omitting this fails the editor build only.
+			"EngineSettings",
+			"ApplicationCore",
+			"Projects",
+			"RenderCore",
+			"RHI",
+			"Json",
+			"JsonUtilities",
+			// UMediaOutput / UMediaCapture come from MediaIOCore; UMediaPlayer / UMediaTexture
+			// come from MediaAssets. They are different modules and both are needed.
+			"Media",
+			"MediaAssets",
+			"MediaIOCore",
+			"MediaUtils",
+			"ImageWrapper",
+		});
+
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			// Media Foundation sink writer: H.264 encode and MP4 mux in one object, no plugin needed.
+			PublicSystemLibraries.AddRange(new string[]
 			{
-				"Core",
-				// ... add other public dependencies that you statically link with here ...
-			}
-			);
-			
-		
-		PrivateDependencyModuleNames.AddRange(
-			new string[]
-			{
-				"CoreUObject",
-				"Engine",
-				"Slate",
-				"SlateCore",
-				// ... add private dependencies that you statically link with here ...	
-			}
-			);
-		
-		
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
-			}
-			);
+				"mfplat.lib",
+				"mfreadwrite.lib",
+				"mfuuid.lib",
+				"ole32.lib",
+			});
+		}
 	}
 }
