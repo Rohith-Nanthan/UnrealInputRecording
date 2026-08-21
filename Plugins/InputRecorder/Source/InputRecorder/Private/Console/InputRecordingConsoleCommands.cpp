@@ -26,10 +26,13 @@ namespace InputRecordingConsole
 {
 	UInputRecordingSubsystem* GetSubsystem(UWorld* World)
 	{
-		if (!World)
+		// The fallback has to trigger on "this world has no game instance", not merely on "no
+		// world was supplied". Typing an ir.* command into the editor's Output Log console while
+		// PIE is running hands us the *editor* world, which is non-null but whose GetGameInstance
+		// is always null - so guarding on (!World) alone made the command fail with "start play
+		// first" at the exact moment play was already running.
+		if (!World || !World->GetGameInstance())
 		{
-			// Fall back to whatever world the engine considers current, so these commands still
-			// work when typed from a context that did not supply one.
 			World = GEngine ? GEngine->GetCurrentPlayWorld() : nullptr;
 		}
 
@@ -106,7 +109,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRecordStartCommand(
 	{
 		if (UInputRecordingSubsystem* Subsystem = InputRecordingConsole::GetSubsystem(World))
 		{
-			Subsystem->ShowOverlay();
+			// Deliberately does NOT call ShowOverlay here. It used to, and StartRecording then
+			// immediately hid the overlay again to keep it out of the capture - so a take that
+			// started perfectly looked like it had done nothing at all. Overlay policy belongs to
+			// StartRecording, which is the only code that knows whether video is being captured.
 			Subsystem->StartRecording(InputRecordingConsole::JoinArgs(Args));
 		}
 	}));

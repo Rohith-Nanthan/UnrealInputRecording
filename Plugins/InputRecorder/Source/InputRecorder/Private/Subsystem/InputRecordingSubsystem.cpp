@@ -328,9 +328,24 @@ bool UInputRecordingSubsystem::StartRecording(const FString& DisplayName)
 		return false;
 	}
 
+	if (Component->IsRecording())
+	{
+		// Say what is actually going on rather than "already busy". A user who types
+		// ir.record.start twice does it because the first attempt looked like it failed, so the
+		// message that matters is "it did not - here is the take you already have, and here is
+		// how to finish it".
+		UE_LOG(LogInputRecording, Display,
+			TEXT("Already recording '%s' into %s (%.1fs so far). Use ir.record.stop to finish it, ")
+			TEXT("or ir.record.cancel to throw it away."),
+			*ActiveSession.DisplayName, *ActiveSession.FolderName, Component->GetRecordingDurationSeconds());
+		return false;
+	}
+
 	if (Component->GetMode() != EInputReplayMode::Idle)
 	{
-		UE_LOG(LogInputRecording, Warning, TEXT("Cannot record: the replay component is already busy."));
+		UE_LOG(LogInputRecording, Warning,
+			TEXT("Cannot record: the replay component is mid-review (mode %d). Finish or leave the review first."),
+			static_cast<int32>(Component->GetMode()));
 		return false;
 	}
 
@@ -359,22 +374,50 @@ bool UInputRecordingSubsystem::StartRecording(const FString& DisplayName)
 	Store->FindSession(SessionIndex, ActiveSession);
 	bLastRecordingQuotaStopped = false;
 
-	if (Settings->bCaptureVideoWithRecording && VideoCapture)
+	const bool bCapturingVideo = Settings->bCaptureVideoWithRecording && VideoCapture != nullptr;
+
+	// Decide overlay visibility once, here, before anything is shown. Viewport capture includes
+	// whatever is drawn over it, so with video on and bCaptureVideoIncludingUI off the overlay
+	// cannot be on screen - but it must never be shown and then torn down, which is what made a
+	// successful first take read as a failure.
+	const bool bOverlayWouldPolluteCapture = bCapturingVideo && !Settings->bCaptureVideoIncludingUI;
+
+	if (bOverlayWouldPolluteCapture)
 	{
-		if (!Settings->bCaptureVideoIncludingUI && IsOverlayVisible())
+		if (IsOverlayVisible())
 		{
-			// Viewport capture always includes whatever is drawn over it, so the only way to keep
-			// the recorder's own controls out of the review video is to take them off screen.
 			HideOverlay();
 			bOverlayHiddenForCapture = true;
 		}
+	}
+	else
+	{
+		ShowOverlay();
+	}
 
+	if (bCapturingVideo)
+	{
 		// Failure here is deliberately non-fatal: a .ghost with no .mp4 is a usable recording,
 		// while a lost .ghost is a take somebody has to re-perform.
 		VideoCapture->StartCapture(ActiveSession.GetVideoPath(), Settings->VideoOptions);
 	}
 
-	UE_LOG(LogInputRecording, Log, TEXT("Take started: %s into %s."), *ResolvedName, *ActiveSession.AbsolutePath);
+	// Display, not Log: this is the confirmation the person at the console is waiting for, and it
+	// is the only feedback they get when the overlay has to stay hidden for the capture.
+	UE_LOG(LogInputRecording, Display,
+		TEXT("Recording '%s' -> %s (%d tracked action(s)%s). ir.record.stop to save, ir.record.cancel to discard."),
+		*ResolvedName, *ActiveSession.FolderName, Component->GetTrackedActionCount(),
+		bOverlayWouldPolluteCapture
+			? TEXT("; overlay hidden so it stays out of the video - set bCaptureVideoIncludingUI to keep it on screen")
+			: TEXT(""));
+
+	// A toast is UMG like the overlay, so it can only be raised when the overlay could be.
+	if (!bOverlayWouldPolluteCapture)
+	{
+		ShowToast(NSLOCTEXT("InputRecording", "TakeStarted", "Recording"),
+			FText::FromString(ResolvedName));
+	}
+
 	return true;
 }
 

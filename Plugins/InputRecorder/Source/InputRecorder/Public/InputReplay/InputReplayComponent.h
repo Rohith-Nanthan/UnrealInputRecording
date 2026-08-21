@@ -156,6 +156,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Input Recording")
 	float GetRecordingDurationSeconds() const { return RecordingTimeSeconds; }
 
+	/**
+	 * How many input actions this take is watching. Worth surfacing rather than keeping to the
+	 * log: zero here is the difference between "nobody pressed anything" and "the component never
+	 * found the player's mapping contexts", and those look identical in a finished recording.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Input Recording")
+	int32 GetTrackedActionCount() const { return TrackedActions.Num(); }
+
 	/** Blueprint copy. C++ callers wanting no copy use GetCurrentRecordingRef. */
 	UFUNCTION(BlueprintPure, Category = "Input Recording", meta = (DisplayName = "Get Current Recording"))
 	FInputRecording GetCurrentRecording() const { return CurrentRecording; }

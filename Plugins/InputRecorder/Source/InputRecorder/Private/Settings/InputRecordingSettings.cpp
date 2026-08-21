@@ -5,12 +5,42 @@
 #include "Blueprint/UserWidget.h"
 #include "InputRecordingLog.h"
 #include "InputReplay/InputReplayComponent.h"
+#include "Settings/InputIconMapping.h"
+#include "Settings/RecordingUIInputConfig.h"
 
 UInputRecordingSettings::UInputRecordingSettings()
 {
-	// Sensible out-of-the-box paths. Everything under /Game/RecordingFolder, nowhere else.
-	ControlRecapMap = FSoftObjectPath(TEXT("/Game/RecordingFolder/Maps/ControlRecapLevel.ControlRecapLevel"));
-	GameplayMap = FSoftObjectPath(TEXT("/Game/ThirdPerson/Lvl_ThirdPerson.Lvl_ThirdPerson"));
+	// Every default points at content this plugin ships, so dropping it into a project that has
+	// never heard of it yields a working recorder with no .ini edits at all. These are only
+	// defaults: a host project overrides any of them from its own DefaultGame.ini as usual.
+	//
+	// Leaving the widget classes empty instead would technically "work" - the code falls back to
+	// the raw C++ classes - but those build no widget tree, so the user gets blank surfaces and
+	// an error in the log. Empty is not a usable default for a drag-and-drop plugin.
+	ControlRecapMap = FSoftObjectPath(TEXT("/InputRecorder/Maps/ControlRecapLevel.ControlRecapLevel"));
+
+	UIInputConfig = TSoftObjectPtr<URecordingUIInputConfig>(
+		FSoftObjectPath(TEXT("/InputRecorder/DataAssets/DA_RecordingUIInput.DA_RecordingUIInput")));
+	IconMapping = TSoftObjectPtr<UInputIconMapping>(
+		FSoftObjectPath(TEXT("/InputRecorder/DataAssets/DA_InputIcons.DA_InputIcons")));
+
+	OverlayWidgetClass          = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_InputRecorderOverlay.WBP_InputRecorderOverlay_C"));
+	SyncPointRowWidgetClass     = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_SyncPointRow.WBP_SyncPointRow_C"));
+	ControlRecapWidgetClass     = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_ControlRecap.WBP_ControlRecap_C"));
+	VideoSurfaceWidgetClass     = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_VideoSurface.WBP_VideoSurface_C"));
+	MatchCueMarkerWidgetClass   = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_MatchCueMarker.WBP_MatchCueMarker_C"));
+	WrongInputRowWidgetClass    = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_WrongInputRow.WBP_WrongInputRow_C"));
+	RecordingListWidgetClass    = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_RecordingList.WBP_RecordingList_C"));
+	RecordingListRowWidgetClass = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_RecordingListRow.WBP_RecordingListRow_C"));
+	RecordingToastWidgetClass   = FSoftClassPath(TEXT("/InputRecorder/Widgets/WBP_RecordingToast.WBP_RecordingToast_C"));
+
+	// GameplayMap is deliberately left empty. It names *host* content - where "cancel" returns to
+	// after a review - and the plugin has no way to guess that. Empty is handled: the review map's
+	// game mode falls back to its own setting, and the recap map is reachable regardless.
+	//
+	// RecordedMappingContexts is likewise left empty on purpose. Empty means "record whatever
+	// contexts are actually applied to this player", which is what lets the component drop into an
+	// unknown project. Naming contexts here would hardcode one project's input assets.
 }
 
 void UInputRecordingSettings::ApplyDefaultsTo(UInputReplayComponent* Component, bool bForce) const

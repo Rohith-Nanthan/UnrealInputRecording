@@ -180,15 +180,31 @@ bool UInputReplayComponent::BuildTrackedActionList()
 			}
 		}
 	}
-	else if (const UEnhancedPlayerInput* PlayerInput = ResolveEnhancedPlayerInput())
+	else
 	{
 		// No explicit context list configured, so record whatever is actually applied to this
 		// player right now. This is what makes the component drop into an unknown project.
-		for (const FEnhancedActionKeyMapping& Mapping : PlayerInput->GetEnhancedActionMappingsView())
+		//
+		// The rebuild below is not optional. Enhanced Input defers mapping rebuilds: AddMappingContext
+		// only sets bMappingRebuildPending, and EnhancedActionMappings stays empty until the input
+		// subsystem next ticks. Reading the view before that returns nothing, BuildTrackedActionList
+		// returns false, and StartRecording fails - on the first attempt only, because by the second
+		// one a tick has been and gone. Forcing the rebuild makes attempt #1 behave like attempt #2.
+		if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem = ResolveEnhancedInputSubsystem())
 		{
-			if (Mapping.Action)
+			FModifyContextOptions Options;
+			Options.bForceImmediately = true;
+			InputSubsystem->RequestRebuildControlMappings(Options);
+		}
+
+		if (const UEnhancedPlayerInput* PlayerInput = ResolveEnhancedPlayerInput())
+		{
+			for (const FEnhancedActionKeyMapping& Mapping : PlayerInput->GetEnhancedActionMappingsView())
 			{
-				Candidates.Add(Mapping.Action);
+				if (Mapping.Action)
+				{
+					Candidates.Add(Mapping.Action);
+				}
 			}
 		}
 	}
